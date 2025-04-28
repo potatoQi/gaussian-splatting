@@ -48,15 +48,20 @@ def get_expon_lr_func(
         if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
             # Disable this parameter
             return 0.0
+        # 如果需要 warm-up
         if lr_delay_steps > 0:
             # A kind of reverse cosine decay.
             delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
                 0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
             )
+        # 如果不需要 warm-up
         else:
             delay_rate = 1.0
+
+        # 指数插值
         t = np.clip(step / max_steps, 0, 1)
         log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
+        
         return delay_rate * log_lerp
 
     return helper
