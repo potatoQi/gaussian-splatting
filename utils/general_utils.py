@@ -27,7 +27,11 @@ def PILtoTorch(pil_image, resolution):
         return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
 
 def get_expon_lr_func(
-    lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
+    lr_init,                # 学习率初始值
+    lr_final,               # 学习率最终值
+    lr_delay_steps=0,
+    lr_delay_mult=1.0,
+    max_steps=1000000       # 学习率变化次数
 ):
     """
     Copied from Plenoxels

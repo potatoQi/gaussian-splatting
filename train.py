@@ -112,8 +112,8 @@ def training(
     for iteration in range(first_iter, opt.iterations + 1):
         # 如果 GUI 对象还没没浏览器建立连接, 就尝试初始化连接
         if network_gui.conn == None:
-            network_gui.try_connect()
-        # 如果 GUI 对象已经建立连接, 就尝试接收来自浏览器的消息
+            network_gui.try_connect()   # 我看了里面的实现, 本质就是 listener.accept(), 它写了个异常捕获, 如果失败就 pass, 不会报错
+        # 如果本次迭代 GUI 对象已经成功建立连接, 就开始与前端交互
         while network_gui.conn != None:
             try:
                 net_image_bytes = None
@@ -155,7 +155,7 @@ def training(
         # 打个点
         iter_start.record()
 
-        # 根据当前迭代步, 更新高斯模型的学习率 (内部用的函数跟之前的 get_expon_lr_func 一样)
+        # 根据当前迭代步, 更新 _xyz 和 _exposure 的学习率
         gaussians.update_learning_rate(iteration)
 
         # 每 1000 步把 SH 阶数提高一级
@@ -289,7 +289,7 @@ def training(
                         radii[visibility_filter]
                     )
                 
-                # 统计下高斯点们的统计信息
+                # 统计下高斯点们的梯度信息 (梯度累计和, 梯度累计次数)
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
@@ -301,10 +301,10 @@ def training(
                     # 稠密化 & 剪枝
                     gaussians.densify_and_prune(
                         opt.densify_grad_threshold,     # 梯度阈值, 只有在这次反向传播中梯度贡献超过这个阈值的, 才会在它们周围长出新点
-                        0.005,                          # 微扰尺度, 生成的新点位置 = 父点 + 随机方向 * 微扰尺度
-                        scene.cameras_extent,           # 场景空间边界, 别让生成的新点跑出去了
+                        0.005,                          # 不透明度下限阈值 (低于这个值的高斯点会被剪掉)
+                        scene.cameras_extent,           # 场景空间的尺度长度
                         size_threshold,                 # 剪枝半径阈值, 任何投影半径大于这个值的高斯点, 都会被剪掉
-                        radii                           # 高斯点们的半径
+                        radii                           # 每个高斯点投影到图像上时的像素半径
                     )
                 
                 # 每隔 opt.opacity_reset_interval 步就把高斯点的透明度重置
