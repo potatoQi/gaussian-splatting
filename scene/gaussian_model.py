@@ -196,7 +196,7 @@ class GaussianModel:
     def add_densification_stats(
         self,
         viewspace_point_tensor,     # 视角下高斯点的坐标
-        update_filter               # 视角下每一个高斯点是否可见 bool 数组
+        update_filter               # 在当前视角下可见高斯点的索引
     ):
         # 首先 torch.norm(input, p=2, dim, keepdim) 是计算 input 在指定维度的 L2 范数, keepdim 表示是否保留被归约的维度, 将其保留为 1
         # 然后这里的 viewspace_point_tensor.grad shape 是 [N 3], 代表了每个高斯点在视角下 xyz 的梯度

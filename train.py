@@ -188,14 +188,13 @@ def training(
         )
         
         # 渲染出来的 rgb 图
-        image = render_pkg["render"]  # tensor, [c, h, w], 分布范围: [0, 1], float32
-        # 所有高斯点在视角下的坐标
+        image = render_pkg["render"]  # tensor, [c, h, w], 范围: [0, 1], float32
+        # 所有高斯点在视角下的 2D 屏幕坐标
         viewspace_point_tensor = render_pkg["viewspace_points"]  # tensor, [N, 3]
-        # 一个 bool, 表示每个高斯点在当前视角下是否可见
-        visibility_filter = render_pkg["visibility_filter"]  # tensor, [N], bool
+        # 在当前视角下可见高斯点的索引
+        visibility_filter = render_pkg["visibility_filter"]  # tensor, [n], int
         # 每个高斯点投影到图像上时的像素半径
         radii = render_pkg["radii"]  # tensor, [N]
-        # image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         # 如果有透明度掩码, 就把渲染出来的图像乘以透明度掩码
         if viewpoint_cam.alpha_mask is not None:
@@ -274,14 +273,10 @@ def training(
             if iteration < opt.densify_until_iter:
                 # 补充个知识点, 如果 a, b 是一维 tensor, 正常情况下, c = a[b] 也是一个一维 tensor
                 # c 这个tensor里面下标为 i 的元素值是 a tensor 中下标为 b[i] 的值 (花式索引)
-                # 但是如果 b 的类型是 bool, 那么把 a tensor 按下标过一遍, b[i] == True 的元素会被保留, b[i] == False 的元素会被丢弃
-                # 也就是 b 类型为 bool 的时候, c = a[b] 也会得到一个一维 tensor, 但其长度可能会比 a 短 (因为为 False 的都会丢掉了)
 
                 # 所以下面这句话就是这么个意思: gaussians.max_radii2D[visibility_filter] 是一个一维 tensor, 里面记录着每个在当前视角下看得见高斯点
                 # 在所有迭代步中自己出现过的最大半径
                 # 所以维护方法就是自己与当前自己的半径取 max 咯. 即打竞赛里的 max_val = max(max_val, now_val)
-                # 所以下面这句话的效果就是 gaussians.max_radii2D 本身会被修改——只有在 visibility_filter==True 的位置上，它的值会被替换成新的最大半径。
-                # 但是 gaussians.max_radii2D 这个一维 tensor 的长度没变
                 gaussians.max_radii2D[visibility_filter] = \
                     torch.max(
                         gaussians.max_radii2D[visibility_filter],
@@ -317,9 +312,6 @@ def training(
                 gaussians.exposure_optimizer.step()
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
                 if use_sparse_adam:
-                    # 补充个知识点:
-                    # 渲染器先判断每个高斯点在相机坐标系里是否落在视锥内, 且没有被前面的点遮挡, 从而得出 visibility_filter
-                    # 对于通过了 visibility_filter 的点, 它们的半径会被渲染器计算出来, 作为 radii
                     # 当开启稀疏 Adam 加速时, 只利用那些像素级别 radii > 0 (而非几何级别可见但像素级别不可见) 的点进行参数优化
                     visible = radii > 0
                     gaussians.optimizer.step(visible, radii.shape[0])
