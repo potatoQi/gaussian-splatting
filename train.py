@@ -63,7 +63,7 @@ def training(
 
     # 实例化一个可学习的三维高斯点云模型实例
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-    # 封装了数据集（图像、相机参数、可选深度/掩码）和高斯模型，提供训练和测试时按视角渲染的方法
+    # 从 COLMAP 处理完的数据里加载数据并封装好, 并初始化 gaussians 里参数的数据
     scene = Scene(dataset, gaussians)
     # 把 opt 优化器参数在 gaussians 中设置好
     gaussians.training_setup(opt)
@@ -255,7 +255,6 @@ def training(
                 loss,                                   # 总损失
                 l1_loss,                                # 计算 L1 损失的函数
                 iter_start.elapsed_time(iter_end),      # 每次迭代耗时
-
                 testing_iterations,                     # test 的时间点, 如果到了该 test 的时间点那么会在打完报告后 test 一下
                 scene,                                  # 场景对象
                 render,                                 # 渲染函数
@@ -266,7 +265,7 @@ def training(
                 dataset.train_test_exp
             )
 
-            # 保存下 Gaussian model
+            # 保存点云 .ply 至 model_path/point_cloud/iteration_xxx/point_cloud.ply
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)

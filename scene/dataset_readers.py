@@ -142,8 +142,18 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
+def readColmapSceneInfo(
+    path,               # 数据集根目录
+    images,             # 图片文件夹 (默认是 "")
+    depths,             # 深度图文件夹 (默认是 "")
+    eval,               # 是否要划分 test_cam_names_list 出来
+    train_test_exp,     # 是否启用 Synthetic‐NeRF 训练评估模式 & 启用曝光补偿
+    llffhold=8          # 用于按固定间隔挑选测试集图像
+):
     try:
+        # 尝试从 .bin 文件读取相机参数
+        # cameras_extrinsic 是相机外参, 其实就是一个 dict: key 是图像的 id, value 是一个结构体, 包括: 相机坐标, 相机旋转, 图像name, 内参id
+        # cameras_intrinsic 是相机内参, 也是一个 dict: key 是相机的 id, value 是一个结构体, 包括: # NOTE: ?
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
         cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
@@ -154,6 +164,7 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
         cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
         cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
+    # 尝试读取深度信息
     depth_params_file = os.path.join(path, "sparse/0", "depth_params.json")
     ## if depth_params_file isnt there AND depths file is here -> throw error
     depths_params = None
@@ -176,14 +187,15 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
             print(f"An unexpected error occurred when trying to open depth_params.json file: {e}")
             sys.exit(1)
 
+    # 若 eval 为真, 则划分训练集测试集; 若为 False, 则 test_cam_names_list 为空
     if eval:
         if "360" in path:
             llffhold = 8
         if llffhold:
             print("------------LLFF HOLD-------------")
-            cam_names = [cam_extrinsics[cam_id].name for cam_id in cam_extrinsics]
+            cam_names = [cam_extrinsics[cam_id].name for cam_id in cam_extrinsics]  # 读取所有图像的名称
             cam_names = sorted(cam_names)
-            test_cam_names_list = [name for idx, name in enumerate(cam_names) if idx % llffhold == 0]
+            test_cam_names_list = [name for idx, name in enumerate(cam_names) if idx % llffhold == 0]   # 每隔 llffhold 张图像取一张作为测试集
         else:
             with open(os.path.join(path, "sparse/0", "test.txt"), 'r') as file:
                 test_cam_names_list = [line.strip() for line in file]
@@ -191,15 +203,24 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
         test_cam_names_list = []
 
     reading_dir = "images" if images == None else images
+    # readColmapCameras 这个函数会遍历所有外参字典 cam_extrinsics, 把每张图对应的旋转、坐标、内参、文件路径、是否是测试集等信息封装为一个 CameraInfo 对象, 然后返回一个列表
     cam_infos_unsorted = readColmapCameras(
-        cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, depths_params=depths_params,
+        cam_extrinsics=cam_extrinsics,
+        cam_intrinsics=cam_intrinsics,
+        depths_params=depths_params,
         images_folder=os.path.join(path, reading_dir), 
-        depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list)
+        depths_folder=os.path.join(path, depths) if depths != "" else "",
+        test_cam_names_list=test_cam_names_list
+    )
+    # 将若干个 CameraInfo 对象按图像名称排序
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
-    train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
+    # 划分训练集和测试集
+    train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test] # 如果是 Synthetic‐NeRF 训练评估模式, 没有啥训练集测试集之分, 都是训练集. 只不过 test 的时候用图的右半边
     test_cam_infos = [c for c in cam_infos if c.is_test]
 
+    # 是基于训练集的相机位姿，计算场景在 NeRFpp 中的归一化参数，包括平移向量和归一化半径
+    # 使得无论原始相机坐标如何分布，都能统一到一个标准的、以场景中心为原点、以 radius 为尺度的坐标系里
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
     ply_path = os.path.join(path, "sparse/0/points3D.ply")
@@ -208,21 +229,23 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     if not os.path.exists(ply_path):
         print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
         try:
-            xyz, rgb, _ = read_points3D_binary(bin_path)
+            xyz, rgb, _ = read_points3D_binary(bin_path)    # 读取点云坐标和颜色
         except:
             xyz, rgb, _ = read_points3D_text(txt_path)
-        storePly(ply_path, xyz, rgb)
+        storePly(ply_path, xyz, rgb)    # 把点云数据保存到 points3D.ply 文件里
     try:
-        pcd = fetchPly(ply_path)
+        pcd = fetchPly(ply_path)    # 把点云数据封装一下返回一个 BasicPointCloud 对象
     except:
         pcd = None
 
-    scene_info = SceneInfo(point_cloud=pcd,
-                           train_cameras=train_cam_infos,
-                           test_cameras=test_cam_infos,
-                           nerf_normalization=nerf_normalization,
-                           ply_path=ply_path,
-                           is_nerf_synthetic=False)
+    scene_info = SceneInfo(
+        point_cloud=pcd,                    # 点云对象
+        train_cameras=train_cam_infos,      # 训练集相机对象列表
+        test_cameras=test_cam_infos,        # 测试集相机对象列表
+        nerf_normalization=nerf_normalization,  # 训练集相机归一化参数
+        ply_path=ply_path,                  # 点云文件路径
+        is_nerf_synthetic=False
+    )
     return scene_info
 
 def readCamerasFromTransforms(path, transformsfile, depths_folder, white_background, is_test, extension=".png"):

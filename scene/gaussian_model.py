@@ -77,7 +77,7 @@ class GaussianModel:
         self.denom = torch.empty(0)                 # 维护每个高斯点的梯度累积的次数
         self.optimizer = None                       # 优化器
         self.percent_dense = 0                      # 启动稠密化的场景覆盖比例阈值
-        self.spatial_lr_scale = 0                   # 空间尺度的缩放因子 (这东西会在实例化 Scene 时会被赋值, 别担心)
+        self.spatial_lr_scale = 0                   # 训练集的空间尺度半径 (场景范围的大小)
         self.setup_functions()      # 定义一些函数
 
     # 把一些优化器相关参数定义好
@@ -227,6 +227,7 @@ class GaussianModel:
         # BUG: 执行到这里的时候 .max_radii2D 已经作废了吧, 全是 0
 
         # 这里的 prune_mask 是一个 bool 数组, 代表了每个高斯点是否需要被剪枝
+        # 把那些不透明度小于阈值的剪掉
         prune_mask = (self.get_opacity < min_opacity).squeeze() # [N]
 
         # 如果指定了 max_screen_size, 还要把 “那些历史上在任一视角下投影到屏幕的最大半径 > max_screen_size 的点” 和 "超过边界" 的点也剪掉
@@ -497,7 +498,12 @@ class GaussianModel:
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
-    def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float):
+    def create_from_pcd(
+        self,
+        pcd : BasicPointCloud,      # 点云对象
+        cam_infos : int,            # 训练集相机对象列表 # BUG: 这里这个 int 是啥意思? 不是应该是 list 吗? 我觉得作者写错了
+        spatial_lr_scale : float    # 训练集的空间尺度半径 (场景范围的大小)
+    ):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
@@ -525,39 +531,6 @@ class GaussianModel:
         self.pretrained_exposures = None
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
-
-    def construct_list_of_attributes(self):
-        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
-        # All channels except the 3 DC
-        for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
-            l.append('f_dc_{}'.format(i))
-        for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
-            l.append('f_rest_{}'.format(i))
-        l.append('opacity')
-        for i in range(self._scaling.shape[1]):
-            l.append('scale_{}'.format(i))
-        for i in range(self._rotation.shape[1]):
-            l.append('rot_{}'.format(i))
-        return l
-
-    def save_ply(self, path):
-        mkdir_p(os.path.dirname(path))
-
-        xyz = self._xyz.detach().cpu().numpy()
-        normals = np.zeros_like(xyz)
-        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        opacities = self._opacity.detach().cpu().numpy()
-        scale = self._scaling.detach().cpu().numpy()
-        rotation = self._rotation.detach().cpu().numpy()
-
-        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
-
-        elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
-        elements[:] = list(map(tuple, attributes))
-        el = PlyElement.describe(elements, 'vertex')
-        PlyData([el]).write(path)
 
     def load_ply(self, path, use_train_test_exp = False):
         plydata = PlyData.read(path)
@@ -611,3 +584,36 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree
+
+    def construct_list_of_attributes(self):
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        # All channels except the 3 DC
+        for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
+            l.append('f_dc_{}'.format(i))
+        for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
+            l.append('f_rest_{}'.format(i))
+        l.append('opacity')
+        for i in range(self._scaling.shape[1]):
+            l.append('scale_{}'.format(i))
+        for i in range(self._rotation.shape[1]):
+            l.append('rot_{}'.format(i))
+        return l
+
+    def save_ply(self, path):
+        mkdir_p(os.path.dirname(path))
+
+        xyz = self._xyz.detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
+        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = self._opacity.detach().cpu().numpy()
+        scale = self._scaling.detach().cpu().numpy()
+        rotation = self._rotation.detach().cpu().numpy()
+
+        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(path)
