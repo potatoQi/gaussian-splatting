@@ -153,7 +153,8 @@ def readColmapSceneInfo(
     try:
         # 尝试从 .bin 文件读取相机参数
         # cameras_extrinsic 是相机外参, 其实就是一个 dict: key 是图像的 id, value 是一个结构体, 包括: 相机坐标, 相机旋转, 图像name, 内参id
-        # cameras_intrinsic 是相机内参, 也是一个 dict: key 是相机的 id, value 是一个结构体, 包括: # NOTE: ?
+        # cameras_intrinsic 是相机内参, 也是一个 dict: key 是相机的 id, value 是一个结构体, 包括:
+        # NOTE: ? ↑
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
         cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)

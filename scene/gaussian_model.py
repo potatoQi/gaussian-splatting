@@ -119,6 +119,7 @@ class GaussianModel:
         # Q: 在 self.optimizer 里不是已经添加了 _xyz 的优化参数和学习率了吗? 为啥又要搞一个学习率调度函数?
         # A: 添加是肯定要添加的, 不然优化器就不会优化 _xyz 了, 但是默认的学习率调度规则我不喜欢啊, 我想自定义, 所以我就定义个函数
         # 到时候直接通过调度函数得到学习率, 然后动态的修改 optimizer 里关于 _xyz 的学习率就好了
+        # BUG: 我觉得这里 lr_delay_mult 传了跟没传一样, 因为没传 lr_delay_steps
         self.xyz_scheduler_args = get_expon_lr_func(
             lr_init=training_args.position_lr_init*self.spatial_lr_scale,
             lr_final=training_args.position_lr_final*self.spatial_lr_scale,
@@ -224,7 +225,7 @@ class GaussianModel:
         # 再 split 一批高梯度, 大尺寸的点
         self.densify_and_split(grads, max_grad, extent)
 
-        # BUG: 执行到这里的时候 .max_radii2D 已经作废了吧, 全是 0
+        # BUG: 执行到这里的时候 .max_radii2D 已经作废了吧, 全是 0, 那么后边根据 max_radii2D 进行剪枝的意义是什么呢?
 
         # 这里的 prune_mask 是一个 bool 数组, 代表了每个高斯点是否需要被剪枝
         # 把那些不透明度小于阈值的剪掉
@@ -501,7 +502,8 @@ class GaussianModel:
     def create_from_pcd(
         self,
         pcd : BasicPointCloud,      # 点云对象
-        cam_infos : int,            # 训练集相机对象列表 # BUG: 这里这个 int 是啥意思? 不是应该是 list 吗? 我觉得作者写错了
+        # BUG: 下面这个 int 是啥意思? 不是应该是 list 吗? 我觉得作者写错了
+        cam_infos : int,            # 训练集相机对象列表
         spatial_lr_scale : float    # 训练集的空间尺度半径 (场景范围的大小)
     ):
         self.spatial_lr_scale = spatial_lr_scale

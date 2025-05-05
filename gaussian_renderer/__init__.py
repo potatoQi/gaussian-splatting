@@ -135,6 +135,7 @@ def render(
     # 开始用光栅化器实例渲染
     # 拿到三个东西: 渲染图像, 半径, 反深度图像
     if separate_sh:
+        # BUG: separate_sh 我感觉是不支持的, 因为这里传了 dc 参数进去, 但是 GaussianRasterizer 的 forward 函数里并没有用到 dc 这个参数
         rendered_image, radii, depth_image = rasterizer(
             means3D = means3D,                          # 所有高斯体的 3D 坐标 [N 3]
             means2D = means2D,                          # [N 3] 的屏幕空间占位张量, 光栅器会往里写入 (x, y) 投影坐标

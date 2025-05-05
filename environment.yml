@@ -1,4 +1,4 @@
-name: gaussian_splatting
+name: 3dgs
 channels:
   - pytorch
   - conda-forge
@@ -13,8 +13,8 @@ dependencies:
   - torchvision=0.13.1
   - tqdm
   - pip:
-    - submodules/diff-gaussian-rasterization
-    - submodules/simple-knn
-    - submodules/fused-ssim
+    - -e submodules/diff-gaussian-rasterization
+    - -e submodules/simple-knn
+    - -e submodules/fused-ssim
     - opencv-python
     - joblib

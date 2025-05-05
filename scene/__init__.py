@@ -31,7 +31,8 @@ class Scene:
         points3D.bin: COLMAP 导出的点云数据
         points3D.ply: 经过 Scene 类处理过后的点云数据
         images.bin: 相机外参, 其实就是一个 dict: key 是图像的 id, value 是一个结构体, 包括: 相机坐标, 相机旋转, 图像name, 内参id
-        cameras.bin: 相机内参, 其实就是一个 dict: key 是相机的 id, value 是一个结构体, 包括: # NOTE: ?
+        cameras.bin: 相机内参, 其实就是一个 dict: key 是相机的 id, value 是一个结构体, 包括:
+        # NOTE: ? ↑
 
     说完数据集文件夹, 说说输出文件夹:
     根目录下有这些文件:
