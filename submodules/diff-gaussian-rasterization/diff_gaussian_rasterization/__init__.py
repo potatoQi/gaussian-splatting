@@ -12,7 +12,7 @@
 from typing import NamedTuple
 import torch.nn as nn
 import torch
-from . import _C
+from . import _C        # 去看 setup.py, 包名叫 _C
 
 def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
@@ -96,18 +96,19 @@ class _RasterizeGaussians(torch.autograd.Function):
         )
 
         # Invoke C++/CUDA rasterizer
+        # 这函数是 raterize_points.cu 的 RasterizeGaussiansCUDA 函数
         num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, invdepths = _C.rasterize_gaussians(*args)
         # num_rendered: 记录每个像素实际上被多少个高斯点贡献了颜色
         # NOTE: ? ↑
-        # color: 三通道 RGB 图像
-        # radii: 高斯体投影到屏幕上的像素半径
+        # color: [3 H W], 渲染图
+        # radii: [P], 高斯体投影到屏幕上的像素半径
         # geomBuffer: 存储每个像素对应哪些高斯点索引
         # NOTE: ?↑
         # binningBuffer: 加速查找哪些点落在哪个屏幕区域
         # NOTE: ?↑
         # imgBuffer: 临时存放中间的像素数据，方便分批处理。这些 Buffer 在前向存好，为后向梯度计算提供随机访问。
         # NOTE: ?↑
-        # invdepths: 反深度图
+        # invdepths: [1 H W], 反深度图
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings

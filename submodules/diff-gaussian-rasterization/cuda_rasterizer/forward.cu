@@ -149,33 +149,39 @@ __device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 r
 
 // Perform initial steps for each Gaussian prior to rasterization.
 template<int C>
-__global__ void preprocessCUDA(int P, int D, int M,
-	const float* orig_points,
-	const glm::vec3* scales,
-	const float scale_modifier,
-	const glm::vec4* rotations,
-	const float* opacities,
-	const float* shs,
-	bool* clamped,
-	const float* cov3D_precomp,
-	const float* colors_precomp,
-	const float* viewmatrix,
-	const float* projmatrix,
-	const glm::vec3* cam_pos,
-	const int W, int H,
-	const float tan_fovx, float tan_fovy,
-	const float focal_x, float focal_y,
-	int* radii,
-	float2* points_xy_image,
-	float* depths,
-	float* cov3Ds,
-	float* rgb,
-	float4* conic_opacity,
-	const dim3 grid,
-	uint32_t* tiles_touched,
-	bool prefiltered,
-	bool antialiasing)
-{
+__global__ void preprocessCUDA(
+	int P,							// 高斯点数量
+	int D,							// sh 的阶数
+	int M,							// sh 的系数数量
+	const float* orig_points,		// 高斯点的 3D 坐标 [P 3]
+	const glm::vec3* scales,		// 每个高斯体的尺度 (在 xyz 轴的缩放长度)
+	const float scale_modifier,		// 控制高斯体们的尺寸, 缩放因子
+	const glm::vec4* rotations,		// 每个高斯体的旋转变量
+	const float* opacities,			// 所有高斯体的不透明度
+	const float* shs,				// sh 系数
+	bool* clamped,							// 是否 clamped 的标志位 (待写入)
+	const float* cov3D_precomp,		// 预先计算好的协方差矩阵 (若有)
+	const float* colors_precomp,	// 预先计算好的 RGB 颜色 (若有)
+	const float* viewmatrix,		// 视图矩阵
+	const float* projmatrix,		// 投影矩阵
+	const glm::vec3* cam_pos,		// 相机在世界里的坐标
+	const int W,					// 图像宽度
+	const int H,					// 图像高度
+	const float tan_fovx,			// 单位深度处的半宽度
+	const float tan_fovy,			// 单位深度处的半高度
+	const float focal_x,			// x 轴焦距
+	const float focal_y,			// y 轴焦距
+	int* radii,								// [P] 每个高斯点投影半径 (要往里填东西)
+	float2* points_xy_image,				// [P 2] 输出的 2D 投影中心
+	float* depths,							// [P] 每个高斯点的深度 (要往里填东西)
+	float* cov3Ds,							// [P 6] 输出的协方差矩阵 (如果没预传 cov3D_precomp, 就输出到这里)
+	float* rgb,								// [P 3] 输出的投影点 RGB 颜色 (如果没预传 colors_precomp, 就输出到这里)
+	float4* conic_opacity,					// [P] 输出的投影点不透明度
+	const dim3 grid,				// 所需 blocks 数量
+	uint32_t* tiles_touched,				// [P] 输出的每个投影点影响到的 tile 数量
+	bool prefiltered,				// 是否开启预滤波
+	bool antialiasing				// 是否开启抗锯齿
+) {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
 		return;
@@ -426,35 +432,47 @@ void FORWARD::render(
 		depth);
 }
 
-void FORWARD::preprocess(int P, int D, int M,
-	const float* means3D,
-	const glm::vec3* scales,
-	const float scale_modifier,
-	const glm::vec4* rotations,
-	const float* opacities,
-	const float* shs,
-	bool* clamped,
-	const float* cov3D_precomp,
-	const float* colors_precomp,
-	const float* viewmatrix,
-	const float* projmatrix,
-	const glm::vec3* cam_pos,
-	const int W, int H,
-	const float focal_x, float focal_y,
-	const float tan_fovx, float tan_fovy,
-	int* radii,
-	float2* means2D,
-	float* depths,
-	float* cov3Ds,
-	float* rgb,
-	float4* conic_opacity,
-	const dim3 grid,
-	uint32_t* tiles_touched,
-	bool prefiltered,
-	bool antialiasing)
-{
+//
+void FORWARD::preprocess(
+	int P,							// 高斯点数量
+	int D,							// sh 的阶数
+	int M,							// sh 的系数数量
+	const float* means3D,			// 高斯点的 3D 坐标 [P 3]
+	const glm::vec3* scales,		// 每个高斯体的尺度 (在 xyz 轴的缩放长度)
+	const float scale_modifier,		// 控制高斯体们的尺寸, 缩放因子
+	const glm::vec4* rotations,		// 每个高斯体的旋转变量
+	const float* opacities,			// 所有高斯体的不透明度
+	const float* shs,				// sh 系数
+	bool* clamped,							// 是否 clamped 的标志位 (待写入)
+	const float* cov3D_precomp,		// 预先计算好的协方差矩阵 (若有)
+	const float* colors_precomp,	// 预先计算好的 RGB 颜色 (若有)
+	const float* viewmatrix,		// 视图矩阵
+	const float* projmatrix,		// 投影矩阵
+	const glm::vec3* cam_pos,		// 相机在世界里的坐标
+	const int W,					// 图像宽度
+	const int H,					// 图像高度
+	const float focal_x,			// x 轴焦距
+	const float focal_y,			// y 轴焦距
+	const float tan_fovx,			// 单位深度处的半宽度
+	const float tan_fovy,			// 单位深度处的半高度
+	int* radii,								// [P] 每个高斯点投影半径 (要往里填东西)
+	float2* means2D,						// [P 2] 输出的 2D 投影中心
+	float* depths,							// [P] 每个高斯点的深度 (要往里填东西)
+	float* cov3Ds,							// [P 6] 输出的协方差矩阵 (如果没预传 cov3D_precomp, 就输出到这里)
+	float* rgb,								// [P 3] 输出的投影点 RGB 颜色 (如果没预传 colors_precomp, 就输出到这里)
+	float4* conic_opacity,					// [P] 输出的投影点不透明度
+	const dim3 grid,				// 所需 blocks 数量
+	uint32_t* tiles_touched,				// [P] 输出的每个投影点影响到的 tile 数量
+	bool prefiltered,				// 是否开启预滤波
+	bool antialiasing				// 是否开启抗锯齿
+) {
+	// <NUM_CHANNELS> 是模板参数, 会传给 preprocessCUDA 的 C
+	// lauch kernel, 有 (P+255)/256 个 block, 每个 block 有 256 个 thread
+	// 一共有 P+255 个 thread, 保证了覆盖 P 个点
 	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
-		P, D, M,
+		P,
+		D,
+		M,
 		means3D,
 		scales,
 		scale_modifier,
@@ -467,9 +485,12 @@ void FORWARD::preprocess(int P, int D, int M,
 		viewmatrix, 
 		projmatrix,
 		cam_pos,
-		W, H,
-		tan_fovx, tan_fovy,
-		focal_x, focal_y,
+		W,
+		H,
+		tan_fovx,
+		tan_fovy,
+		focal_x,
+		focal_y,
 		radii,
 		means2D,
 		depths,
@@ -480,5 +501,5 @@ void FORWARD::preprocess(int P, int D, int M,
 		tiles_touched,
 		prefiltered,
 		antialiasing
-		);
+	);
 }

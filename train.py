@@ -216,7 +216,6 @@ def training(
         # 深度损失
         Ll1depth_pure = 0.0
         # 如果当前视角的深度图可信, 且当前迭代步的深度损失权重大于 0, 就计算深度损失
-        print(type(render_pkg["depth"]), render_pkg["depth"].shape)
         if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
             invDepth = render_pkg["depth"]  # 拿到渲染的反深度图
             mono_invdepth = viewpoint_cam.invdepthmap.cuda()    # 拿到 gt 反深度图

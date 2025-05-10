@@ -196,84 +196,121 @@ CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chun
 // Forward rendering procedure for differentiable rasterization
 // of Gaussians.
 int CudaRasterizer::Rasterizer::forward(
-	std::function<char* (size_t)> geometryBuffer,
-	std::function<char* (size_t)> binningBuffer,
-	std::function<char* (size_t)> imageBuffer,
-	const int P, int D, int M,
-	const float* background,
-	const int width, int height,
-	const float* means3D,
-	const float* shs,
-	const float* colors_precomp,
-	const float* opacities,
-	const float* scales,
-	const float scale_modifier,
-	const float* rotations,
-	const float* cov3D_precomp,
-	const float* viewmatrix,
-	const float* projmatrix,
-	const float* cam_pos,
-	const float tan_fovx, float tan_fovy,
-	const bool prefiltered,
-	float* out_color,
-	float* depth,
-	bool antialiasing,
-	int* radii,
-	bool debug)
-{
+	std::function<char* (size_t)> geometryBuffer,	// geomBuffer 扩容函数 & 返回指针 (要往里填东西)
+	std::function<char* (size_t)> binningBuffer,	// binningBuffer 扩容函数 & 返回指针 (要往里填东西)
+	std::function<char* (size_t)> imageBuffer,		// imageBuffer 扩容函数 & 返回指针 (要往里填东西)
+	const int P,			// 高斯点数量
+	const int D,			// sh 的阶数
+	const int M,			// sh 系数的数量
+	const float* background,				// 背景颜色
+	const int width,						// 图像宽度
+	const int height,						// 图像高度
+	const float* means3D,					// 高斯点的 3D 坐标 [P 3]
+	const float* shs,						// sh 系数
+	const float* colors_precomp,			// 预先计算好的 RGB 颜色 (若有)
+	const float* opacities,					// 所有高斯体的不透明度
+	const float* scales,					// 每个高斯体的尺度 (在 xyz 轴的缩放长度)
+	const float scale_modifier,				// 控制高斯体们的尺寸, 缩放因子
+	const float* rotations,					// 每个高斯体的旋转变量
+	const float* cov3D_precomp,				// 预先计算好的协方差矩阵 (若有)
+	const float* viewmatrix,				// 视图矩阵
+	const float* projmatrix,				// 投影矩阵
+	const float* cam_pos,					// 相机在世界里的坐标
+	const float tan_fovx,					// 单位深度处的半宽度
+	const float tan_fovy,					// 单位深度处的半高度
+	const bool prefiltered,					// 表示你是否已经在别的地方对颜色做过“预滤波”（模糊、降采样）处理。这里设为 False，让 rasterizer 自己来处理
+	float* out_color,			// 渲染图像 (要往里填东西)
+	float* depth,				// 反深度图 (要往里填东西)
+	bool antialiasing,						// 是否开启抗锯齿
+	int* radii,					// 每个高斯点投影半径 (要往里填东西)
+	bool debug								// 是否开启 debug 模式
+) {
+	// 想象一个针孔相机, 光线从物体经过针孔, 打到后面的成像平面, 焦距就是针孔到成像平面之间的距离
+	// f 越大, 成像平面离针孔远，投影的物体看上去“更大”、视野更窄（长焦）。
+	// f 越小, 成像平面离针孔近，投影的物体看上去“更小”、视野更宽（广角）。
+	// 下面计算的 focal_x/focal_y 就是在针孔相机的放射角固定的前提下, 为了使得成像平面大小是 height x width 的 x/y 焦距
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
+	// required<GeometryState>(P) 是一个编译时/运行时帮助函数, 用来计算如果要存下 P 个高斯点的 GeometryState 需要的字节大小
+	// GeometryState 是一个结构体, 里面存放了高斯点的各种信息: 坐标协方差颜色不透明度等
 	size_t chunk_size = required<GeometryState>(P);
+
+	// 在 geometryBuffer 中申请 chunk_size 大小的内存, 并返回指向这块内存的指针, 用来存放 P 个点的 GeometryState
 	char* chunkptr = geometryBuffer(chunk_size);
+
+	// 简单理解就行, fromChunk 是一个静态方法, 它接受一个原始内存指针 chunkptr 和高斯点数量 P, 然后返回一个把原始内存结构化好的 GeometryState 对象
+	// 后续往里填东西就行
 	GeometryState geomState = GeometryState::fromChunk(chunkptr, P);
 
-	if (radii == nullptr)
-	{
+	// 正常 radii 传进来的是一块区域内存的指针, 占位用的, 待填充
+	// 可是如果 radii 没分配内存, 那么就用 geomState.internal_radii 这个指针
+	if (radii == nullptr) {
 		radii = geomState.internal_radii;
 	}
 
-	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
+	// 这里名字起的比较诡异, 这里的 block 其实就是说一个 block 分配 16x16x1 个 thread
 	dim3 block(BLOCK_X, BLOCK_Y, 1);
+	// 这里计算所需的 blocks 数量
+	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
 
 	// Dynamically resize image-based auxiliary buffers during training
+	// required<ImageState>(width * height) 是一个编译时/运行时帮助函数, 用来计算如果要存下 width * height 个像素的 ImageState 需要的字节大小
 	size_t img_chunk_size = required<ImageState>(width * height);
+	// 在 imageBuffer 中申请 img_chunk_size 大小的内存, 并返回指向这块内存的指针, 用来存放 width * height 个像素的 ImageState
 	char* img_chunkptr = imageBuffer(img_chunk_size);
+	// 简单理解就行, fromChunk 是一个静态方法, 它接受一个原始内存指针 img_chunkptr 和像素数量 width * height, 然后返回一个把原始内存结构化好的 ImageState 对象
 	ImageState imgState = ImageState::fromChunk(img_chunkptr, width * height);
 
-	if (NUM_CHANNELS != 3 && colors_precomp == nullptr)
-	{
+	/*
+		到了这里, 我们已经有:
+			GeometryState geomState: 里面存放了高斯点的各种信息: 坐标协方差颜色不透明度等
+			ImageState imgState: 里面存放了像素的各种信息: 像素颜色、深度等
+	*/
+
+	// 如果不是在做标准的 RGB 渲染, 那么就需要提供预先计算好的颜色. 否则报错
+	if (NUM_CHANNELS != 3 && colors_precomp == nullptr) {
 		throw std::runtime_error("For non-RGB, provide precomputed Gaussian colors!");
 	}
 
 	// Run preprocessing per-Gaussian (transformation, bounding, conversion of SHs to RGB)
-	CHECK_CUDA(FORWARD::preprocess(
-		P, D, M,
-		means3D,
-		(glm::vec3*)scales,
-		scale_modifier,
-		(glm::vec4*)rotations,
-		opacities,
-		shs,
-		geomState.clamped,
-		cov3D_precomp,
-		colors_precomp,
-		viewmatrix, projmatrix,
-		(glm::vec3*)cam_pos,
-		width, height,
-		focal_x, focal_y,
-		tan_fovx, tan_fovy,
-		radii,
-		geomState.means2D,
-		geomState.depths,
-		geomState.cov3D,
-		geomState.rgb,
-		geomState.conic_opacity,
-		tile_grid,
-		geomState.tiles_touched,
-		prefiltered,
-		antialiasing
-	), debug)
+	// 把高斯体从世界坐标下的参数转换到屏幕空间下的各种中间量, 为后续真正的光栅化 render 做准备
+	CHECK_CUDA(
+		FORWARD::preprocess(
+			P,							// 高斯点数量
+			D,							// sh 的阶数
+			M,							// sh 系数的数量
+			means3D,					// 高斯点的 3D 坐标 [P 3]
+			(glm::vec3*)scales,			// 每个高斯体的尺度 (在 xyz 轴的缩放长度) (这里的 glm::vec3* 意思是把原本 float* 指向一大片连续浮点数的指针, 解释为 glm::vec3*, 即在代码里可以直接写 scales[i].x)
+			scale_modifier,				// 控制高斯体们的尺寸, 缩放因子
+			(glm::vec4*)rotations,		// 每个高斯体的旋转变量
+			opacities,					// 所有高斯体的不透明度
+			shs,						// sh 系数
+			geomState.clamped,						// 是否 clamped 的标志位 (待写入)
+			cov3D_precomp,				// 预先计算好的协方差矩阵 (若有)
+			colors_precomp,				// 预先计算好的 RGB 颜色 (若有)
+			viewmatrix,					// 视图矩阵
+			projmatrix,					// 投影矩阵
+			(glm::vec3*)cam_pos,		// 相机在世界里的坐标
+			width,						// 图像宽度
+			height,						// 图像高度
+			focal_x,					// x 轴焦距
+			focal_y,					// y 轴焦距
+			tan_fovx,					// 单位深度处的半宽度
+			tan_fovy,					// 单位深度处的半高度
+			radii,									// [P] 每个高斯点投影半径 (要往里填东西)
+			geomState.means2D,						// [P 2] 输出的 2D 投影中心
+			geomState.depths,						// [P] 输出的 2D 投影深度
+			geomState.cov3D,						// [P 6] 输出的协方差矩阵 (如果没预传 cov3D_precomp, 就输出到这里)
+			geomState.rgb,							// [P 3] 输出的投影点 RGB 颜色 (如果没预传 colors_precomp, 就输出到这里)
+			geomState.conic_opacity,				// [P] 输出的投影点不透明度
+			tile_grid,					// 所需 blocks 数量
+			geomState.tiles_touched,				// [P] 输出的每个投影点影响到的 tile 数量
+			prefiltered,				// 是否开启预滤波
+			antialiasing				// 是否开启抗锯齿
+		),
+		debug
+	)
 
 	// Compute prefix sum over full list of touched tile counts by Gaussians
 	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
