@@ -96,7 +96,6 @@ RasterizeGaussiansCUDA(
 	torch::TensorOptions options(torch::kByte);
 
 	// 这里创建了三个空 tensor, geomBuffer, binningBuffer, imgBuffer; 数据类型为 uint8, 放在 gpu 上
-	// NOTE: 我暂时不知道这三个 tensor 的具体代表什么, 有什么用
 	torch::Tensor geomBuffer = torch::empty({0}, options.device(device));
 	torch::Tensor binningBuffer = torch::empty({0}, options.device(device));
 	torch::Tensor imgBuffer = torch::empty({0}, options.device(device));
@@ -108,7 +107,7 @@ RasterizeGaussiansCUDA(
 	std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer);
 	std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer);
 	
-	// NOTE: 这个变量表示什么意思我也不理解目前
+	// 渲染动作的总次数
 	int rendered = 0;
 
 	if(P != 0) {
@@ -153,12 +152,12 @@ RasterizeGaussiansCUDA(
 	}
 
 	return std::make_tuple(
-		rendered,		// NOTE: ?
+		rendered,		// 渲染动作的总次数
 		out_color,		// [3 H W], 渲染图
 		radii,			// [P], 每个高斯点投影半径
-		geomBuffer,		// NOTE: ?
-		binningBuffer,	// NOTE: ?
-		imgBuffer,		// NOTE: ?
+		geomBuffer,
+		binningBuffer,
+		imgBuffer,
 		out_invdepth	// [1 H W], 反深度图
 	);
 }
