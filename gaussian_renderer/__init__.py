@@ -148,7 +148,13 @@ def render(
             cov3D_precomp = cov3D_precomp               # 预先计算好的协方差矩阵 (若有)
         )
     else:
-        rendered_image, radii, depth_image = rasterizer(
+        (
+            rendered_image,
+            radii,
+            depth_image,
+            gauss_sum,
+            gauss_count,
+        ) = rasterizer(
             means3D = means3D,                          # 所有高斯体的 3D 坐标 [N 3]
             means2D = means2D,                          # [N 3] 的屏幕空间占位张量, 光栅器会往里写入 (x, y) 投影坐标
             shs = shs,                                  # sh 系数
@@ -168,11 +174,14 @@ def render(
     # 返回成图之前, 把数值范围 clamp 一下, 保证正确
     rendered_image = rendered_image.clamp(0, 1)
 
+    assert radii.shape == gauss_sum.shape and radii.shape == gauss_count.shape, "gauss_sum and gauss_count should have the same shape as radii"
     out = {
         "render": rendered_image,                       # 渲染的 2D 图像
         "viewspace_points": screenspace_points,         # screenspace_points 这个张量里面此时已经写入了每个高斯的屏幕坐标 (内含梯度信息)
         "visibility_filter" : (radii > 0).nonzero(),    # 从所有高斯体中筛出“在屏幕上真实可见”的那些，返回它们的索引
         "radii": radii,                                 # 每个高斯点投影到图像上时的像素半径
-        "depth" : depth_image                           # 渲染的反深度图
+        "depth" : depth_image,                           # 渲染的反深度图
+        "gauss_sum": gauss_sum,
+        "gauss_count": gauss_count,
     }
     return out

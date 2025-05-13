@@ -97,18 +97,26 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         # Invoke C++/CUDA rasterizer
         # 这函数是 raterize_points.cu 的 RasterizeGaussiansCUDA 函数
-        num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, invdepths = _C.rasterize_gaussians(*args)
-        # num_rendered: 记录每个像素实际上被多少个高斯点贡献了颜色
-        # NOTE: ? ↑
+        (
+            num_rendered,
+            color,
+            radii,
+            geomBuffer,
+            binningBuffer,
+            imgBuffer,
+            invdepths,
+            accum_alpha,
+            gauss_sum,
+            gauss_count
+        ) = _C.rasterize_gaussians(*args)
+        # num_rendered: 渲染动作的总次数
         # color: [3 H W], 渲染图
-        # radii: [P], 高斯体投影到屏幕上的像素半径
-        # geomBuffer: 存储每个像素对应哪些高斯点索引
-        # NOTE: ?↑
-        # binningBuffer: 加速查找哪些点落在哪个屏幕区域
-        # NOTE: ?↑
-        # imgBuffer: 临时存放中间的像素数据，方便分批处理。这些 Buffer 在前向存好，为后向梯度计算提供随机访问。
-        # NOTE: ?↑
+        # radii: [P], 每个高斯投影圆心半径
         # invdepths: [1 H W], 反深度图
+        # accum_alpha: [1 H W], 每个 pixel 的剩余透射率
+        # gauss_sum: [P], 每个高斯体所有射线到它的透射率总和
+        # gauss_count: [P], 每个高斯体有多少射线投射到它上面
+        
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
@@ -123,22 +131,21 @@ class _RasterizeGaussians(torch.autograd.Function):
             radii,                  # 高斯体投影到屏幕上的像素半径
             sh,                     # sh 系数
             opacities,              # 所有高斯体的不透明度
-            geomBuffer,             # 存储每个像素对应哪些高斯点索引
-            # NOTE: ?↑
-            binningBuffer,          # 加速查找哪些点落在哪个屏幕区域
-            # NOTE: ?↑
-            imgBuffer               # 临时存放中间的像素数据，方便分批处理。这些 Buffer 在前向存好，为后向梯度计算提供随机访问。
-            # NOTE: ?↑
+            geomBuffer,
+            binningBuffer,
+            imgBuffer
         )
         
-        return color, radii, invdepths
+        return color, radii, invdepths, gauss_sum, gauss_count
 
     @staticmethod
     def backward(
         ctx,
         grad_out_color,             # 对渲染图 color 的梯度
-        _,                          # 对 radii 的梯度, 这里不需要, 所以用 _ 占位
-        grad_out_depth              # 对反深度图 invdepths 的梯度
+        _1,                          # 对 radii 的梯度, 这里不需要, 所以用 _ 占位
+        grad_out_depth,              # 对反深度图 invdepths 的梯度
+        _2,
+        _3,
     ):
         # 恢复对应 forward 里通过 ctx.save_for_backward 保存的变量
         num_rendered = ctx.num_rendered
@@ -166,14 +173,10 @@ class _RasterizeGaussians(torch.autograd.Function):
             sh,                                 # sh 系数
             raster_settings.sh_degree,          # 球谐函数阶数
             raster_settings.campos,             # 相机在世界里的坐标
-            geomBuffer,                         # 存储每个像素对应哪些高斯点索引
-            # NOTE: ?↑
-            num_rendered,                       # 记录每个像素实际上被多少个高斯点贡献了颜色
-            # NOTE: ?↑
-            binningBuffer,                      # 加速查找哪些点落在哪个屏幕区域
-            # NOTE: ?↑
-            imgBuffer,                          # 临时存放中间的像素数据，方便分批处理。这些 Buffer 在前向存好，为后向梯度计算提供随机访问。
-            # NOTE: ?↑
+            geomBuffer,
+            num_rendered,
+            binningBuffer,
+            imgBuffer,
             raster_settings.antialiasing,       # 是否开启抗锯齿
             raster_settings.debug               # 如果 True，光栅化器会多打印点位数据、可视化中间结果，方便调试
         )

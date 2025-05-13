@@ -39,7 +39,10 @@ std::tuple<
 	torch::Tensor,	// geomBuffer: 存储每个像素对应哪些高斯点索引
 	torch::Tensor,	// binningBuffer: 加速查找哪些点落在哪个屏幕区域
 	torch::Tensor,	// imgBuffer: 临时存放中间的像素数据，方便分批处理。这些 Buffer 在前向存好，为后向梯度计算提供随机访问。
-	torch::Tensor	// invdepth: 反深度图
+	torch::Tensor,	// invdepth: 反深度图
+	torch::Tensor,	// accum_alpha: 每个 pixel 的剩余透射率
+	torch::Tensor,	// gauss_sum
+	torch::Tensor	// gauss_count
 >
 RasterizeGaussiansCUDA(
 	// 这里传的是地址, 省空间; 同时用了 const, 所以同时避免了不小心的修改操作
@@ -110,6 +113,15 @@ RasterizeGaussiansCUDA(
 	// 渲染动作的总次数
 	int rendered = 0;
 
+	// 定义一个指针, 接收每个 pixel 的剩余透射率 (要往里填东西)
+	torch::Tensor accum_alpha = torch::empty({1, H, W}, float_opts.device(torch::kCUDA));
+	float* accum_alpha_ptr = accum_alpha.data_ptr<float>();
+
+	torch::Tensor gauss_sum = torch::zeros({P}, float_opts.device(torch::kCUDA));
+	float* gauss_sum_ptr = gauss_sum.data_ptr<float>();
+	torch::Tensor gauss_count = torch::zeros({P}, int_opts.device(torch::kCUDA));
+	int* gauss_count_ptr = gauss_count.data_ptr<int>();
+
 	if(P != 0) {
 		// M 是每个高斯点球谐系数的数量
 		int M = 0;
@@ -147,7 +159,10 @@ RasterizeGaussiansCUDA(
 			out_invdepthptr,						// 反深度图 (要往里填东西)
 			antialiasing,									// 是否开启抗锯齿
 			radii.contiguous().data<int>(),			// 每个高斯点投影半径 (要往里填东西)
-			debug											// 是否开启调试模式
+			debug,											// 是否开启调试模式
+			accum_alpha_ptr,							// 每个 pixel 的剩余透射率 (要往里填东西)
+			gauss_sum_ptr,
+			gauss_count_ptr
 		);
 	}
 
@@ -158,7 +173,10 @@ RasterizeGaussiansCUDA(
 		geomBuffer,
 		binningBuffer,
 		imgBuffer,
-		out_invdepth	// [1 H W], 反深度图
+		out_invdepth,	// [1 H W], 反深度图
+		accum_alpha,		// [1 H W], 每个 pixel 的剩余透射率
+		gauss_sum,
+		gauss_count
 	);
 }
 

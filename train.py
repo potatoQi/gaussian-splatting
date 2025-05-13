@@ -196,6 +196,12 @@ def training(
         # 每个高斯点投影到图像上时的像素半径
         radii = render_pkg["radii"]  # tensor, [N]
 
+        if iteration % 100 == 0:
+            print('===========================================================')
+            for idx in range(min(10, len(render_pkg['gauss_sum']))):
+                if render_pkg['gauss_count'][idx] > 0:
+                    print(f"Gaussian {idx} , Transmittance: {render_pkg['gauss_sum'][idx] / render_pkg['gauss_count'][idx]}")
+
         # 如果有透明度掩码, 就把渲染出来的图像乘以透明度掩码
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()

@@ -317,13 +317,15 @@ renderCUDA(
 	int H,											// 图像高度
 	const float2* __restrict__ points_xy_image,		// [P 2] 高斯投影圆心的坐标
 	const float* __restrict__ features,				// [P 3] 高斯投影圆心的 RGB 颜色
-	const float4* __restrict__ conic_opacity,		// 
+	const float4* __restrict__ conic_opacity,		// 高斯投影圆心的 2D 协方差矩阵的逆矩阵 和 输入的不透明度
 	float* __restrict__ final_T,							// 每个 pixel 的剩余透射率 (要往里填东西)
 	uint32_t* __restrict__ n_contrib,						// 实际影响到该 pixel 的高斯体实例数量 (要往里填东西)
 	const float* __restrict__ bg_color,				// 背景颜色
 	float* __restrict__ out_color,							// 渲染图像 (要往里填东西)
 	const float* __restrict__ depths,				// [P] 高斯投影深度
-	float* __restrict__ invdepth							// 反深度图 (要往里填东西)
+	float* __restrict__ invdepth,							// 反深度图 (要往里填东西)
+	float* __restrict__ gauss_sum,
+	int* __restrict__ gauss_count
 ) {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -406,6 +408,7 @@ renderCUDA(
 			// Resample using conic matrix (cf. "Surface 
 			// Splatting" by Zwicker et al., 2001)
 			// 下面就是计算出一个 power, 这个 power 的取值跟是否这个高斯实例会对当前 pixel 产生影响有关
+			int idx_gaussian = collected_id[j];	// 该高斯体实例的索引
 			float2 xy = collected_xy[j];	// 该高斯体实例的投影圆心坐标
 			float2 d = { xy.x - pixf.x, xy.y - pixf.y };
 			float4 con_o = collected_conic_opacity[j];
@@ -427,6 +430,12 @@ renderCUDA(
 				done = true;
 				continue;
 			}
+
+			// 把 test_T 累加到下标为 idx_gaussian 的高斯体上去, 然后该高斯体的 count++
+			// 这里用原子操作是因为可能有多个 pixel 同时命中同一个 idx_gaussian, 而 += 这个操作会先读一个旧值然后加新值再存回去, 同时命中会导致数据错乱
+			// 所以就用原子操作
+			atomicAdd(&gauss_sum[idx_gaussian], test_T);
+			atomicAdd(&gauss_count[idx_gaussian], 1);
 
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
@@ -475,7 +484,9 @@ void FORWARD::render(
 	const float* bg_color,			// 背景颜色
 	float* out_color,						// 渲染图像 (要往里填东西)
 	float* depths,					// [P] 高斯投影深度
-	float* depth							// 反深度图 (要往里填东西)
+	float* depth,							// 反深度图 (要往里填东西)
+	float* gauss_sum,
+	int* gauss_count
 ) {
 	// 并行处理每个像素
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
@@ -491,7 +502,9 @@ void FORWARD::render(
 		bg_color,
 		out_color,
 		depths, 
-		depth
+		depth,
+		gauss_sum,
+		gauss_count
 	);
 }
 

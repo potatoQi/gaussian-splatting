@@ -222,7 +222,10 @@ int CudaRasterizer::Rasterizer::forward(
 	float* depth,				// 反深度图 (要往里填东西)
 	bool antialiasing,						// 是否开启抗锯齿
 	int* radii,					// 每个高斯点投影半径 (要往里填东西)
-	bool debug								// 是否开启 debug 模式
+	bool debug,								// 是否开启 debug 模式
+	float* out_accum_alpha,// 每个 pixel 的剩余透射率 (要往里填东西)
+	float* gauss_sum,
+	int* gauss_count
 ) {
 	// 想象一个针孔相机, 光线从物体经过针孔, 打到后面的成像平面, 焦距就是针孔到成像平面之间的距离
 	// f 越大, 成像平面离针孔远，投影的物体看上去“更大”、视野更窄（长焦）。
@@ -409,10 +412,15 @@ int CudaRasterizer::Rasterizer::forward(
 			background,					// 背景颜色
 			out_color,							// 渲染图像 (要往里填东西)
 			geomState.depths,			// [P] 高斯投影深度
-			depth								// 反深度图 (要往里填东西)
+			depth,								// 反深度图 (要往里填东西)
+			gauss_sum,
+			gauss_count
 		),
 		debug
 	)
+
+	// 把每个 pixel 的剩余透射率返回回去
+	out_accum_alpha = imgState.accum_alpha;
 
 	// 渲染动作的总次数
 	return num_rendered;
