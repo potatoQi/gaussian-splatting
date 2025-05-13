@@ -318,8 +318,8 @@ renderCUDA(
 	const float2* __restrict__ points_xy_image,		// [P 2] 高斯投影圆心的坐标
 	const float* __restrict__ features,				// [P 3] 高斯投影圆心的 RGB 颜色
 	const float4* __restrict__ conic_opacity,		// 
-	float* __restrict__ final_T,							// NOTE: ?
-	uint32_t* __restrict__ n_contrib,						// NOTE: ?
+	float* __restrict__ final_T,							// 每个 pixel 的剩余透射率 (要往里填东西)
+	uint32_t* __restrict__ n_contrib,						// 实际影响到该 pixel 的高斯体实例数量 (要往里填东西)
 	const float* __restrict__ bg_color,				// 背景颜色
 	float* __restrict__ out_color,							// 渲染图像 (要往里填东西)
 	const float* __restrict__ depths,				// [P] 高斯投影深度
@@ -330,61 +330,83 @@ renderCUDA(
 	uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
 	uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
 	uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
+	// 二维下标
 	uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
+	// 一维下标
 	uint32_t pix_id = W * pix.y + pix.x;
+	// 二维下标 (浮点版)
 	float2 pixf = { (float)pix.x, (float)pix.y };
 
 	// Check if this thread is associated with a valid pixel or outside.
+	// 这个线程是否在范围内
 	bool inside = pix.x < W&& pix.y < H;
-	// Done threads can help with fetching, but don't rasterize
+	// 那些边界外的 thread, 就让它们的 done=True, 后边不让它们去执行渲染操作, 只让它们去执行一下 fetching 工作就好了
 	bool done = !inside;
 
 	// Load start/end range of IDs to process in bit sorted list.
+	// block.group_index().y * horizontal_blocks + block.group_index().x 是当前 thread 所在 tile 的编号
+	// range[tileID].x ~ range[tileID].y 是当前 tile 负责的高斯点的索引范围
 	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+	// rounds 表示如果一轮处理 BLOCK_SIZE 个高斯体实例, 全部处理完 range.y - range.x 个高斯体实例, 需要多少轮 (range 是左闭右开的)
 	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	// 这个 tile 一共有多少个高斯体实例需要遍历
 	int toDo = range.y - range.x;
 
 	// Allocate storage for batches of collectively fetched data.
+	// 这里比较巧妙的, 既然是并行所有像素去计算, 为什么前面还要计算这个像素属于哪个 tile 呢?
+	// 原因就是一个 tile 内需要读取的高斯体实例信息是一样的。因为当时排序就是先按 tile 从小到大, 再按 depth 从小到大
+	// 所以一个 tile 里有 256 个 pixel 嘛, 这些 pixel 既然都属于一个 tile, 所以需要用到的高斯体实例信息都是一样的
+	// 那么这些信息存一次就好, 不需要存 256 次; shared memory 就是解决这个问题, share memory 的作用域是一个 block, 刚好对应着一个 tile
+	// 即只有这个 block 里任意一个 thread 存了数据, 那么其它的 threads 也能看到
+
+	// 定义占位好; collected_id 是高斯体实例的索引, collected_xy 是高斯体投影圆心的坐标, collected_conic_opacity 是高斯体实例的 2D 协方差逆矩阵 + 透明度
 	__shared__ int collected_id[BLOCK_SIZE];
 	__shared__ float2 collected_xy[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
 
 	// Initialize helper variables
+	// T 是剩余透射率, 初始为 1.0 表示光线还未被任何高斯体吸收, 后面每遇到一个不透明度为 α 的高斯体, 就 T *= (1 - α)
 	float T = 1.0f;
+	// contributor 表示影响到该 pixel 的高斯体实例数量
 	uint32_t contributor = 0;
+	// 记录最后一个对该 pixel 产生贡献的高斯体实例数量编号 (1 <= last_contributor <= contributor)
 	uint32_t last_contributor = 0;
+	// 该 pixel CHANNEL 通道的值
 	float C[CHANNELS] = { 0 };
-
+	// 该 pixel 的反深度值
 	float expected_invdepth = 0.0f;
 
 	// Iterate over batches until all done or range is complete
-	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
-	{
+	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE) {	// 一次处理 BLOCK_SIZE 个高斯体实例 
 		// End if entire block votes that it is done rasterizing
-		int num_done = __syncthreads_count(done);
-		if (num_done == BLOCK_SIZE)
+		// 因为有可能覆盖到这个 tile 的高斯体数量非常之多, 但是一个 tile 只有 BLOCK_SIZE 个 thread, 所以一次最多只能处理 BLOCK_SIZE 个高斯体实例
+		int num_done = __syncthreads_count(done);	// 统计当前 block 中有多少个 thread 已经是 done
+		if (num_done == BLOCK_SIZE) // 如果当前 block (tile) 中所有的 thread 都已经是 done 了, 那就 break
 			break;
 
 		// Collectively fetch per-Gaussian data from global to shared
-		int progress = i * BLOCK_SIZE + block.thread_rank();
-		if (range.x + progress < range.y)
-		{
+		// 下面其实就是给每个 pixel 分配一个高斯体实例, 让这个 pixel 去读取高斯体实例的信息
+		int progress = i * BLOCK_SIZE + block.thread_rank();	// 进度: 表示处理到第几个高斯体实例了
+		if (range.x + progress < range.y) { // 如果这个 pixel 负责的高斯体实例在该 tile 要处理的高斯体实例范围内
+			// 取出的 coll_id 是高斯体的 idx
 			int coll_id = point_list[range.x + progress];
+			// 当前这个 pixel 把 idx 这个高斯体实例存在自己下标的 shared memory 里
 			collected_id[block.thread_rank()] = coll_id;
 			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
 		}
+		// 保证当前 tile 里所有 thread 都完成上述运算才进行下一步
 		block.sync();
 
 		// Iterate over current batch
-		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
-		{
+		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++) { // j 是遍历当前 shared memory 中的高斯体实例 (如果当前 pixel 已经渲染完毕就不进这里)
 			// Keep track of current position in range
 			contributor++;
 
 			// Resample using conic matrix (cf. "Surface 
 			// Splatting" by Zwicker et al., 2001)
-			float2 xy = collected_xy[j];
+			// 下面就是计算出一个 power, 这个 power 的取值跟是否这个高斯实例会对当前 pixel 产生影响有关
+			float2 xy = collected_xy[j];	// 该高斯体实例的投影圆心坐标
 			float2 d = { xy.x - pixf.x, xy.y - pixf.y };
 			float4 con_o = collected_conic_opacity[j];
 			float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
@@ -395,22 +417,26 @@ renderCUDA(
 			// Obtain alpha by multiplying with Gaussian opacity
 			// and its exponential falloff from mean.
 			// Avoid numerical instabilities (see paper appendix). 
+			// alpha=1 是不透明, alpha=0 是透明
+			// 计算该高斯体对当前 pixel 的不透明度 = 高斯体本身的不透明度 * 系数 (越远系数越小)
 			float alpha = min(0.99f, con_o.w * exp(power));
 			if (alpha < 1.0f / 255.0f)
-				continue;
-			float test_T = T * (1 - alpha);
-			if (test_T < 0.0001f)
-			{
+				continue; // 如果 alpha < 1/255, 说明该高斯体对于该 pixel 来说太透明了, 没影响, 直接 continue
+			float test_T = T * (1 - alpha); // 1-α 代表应该削弱的比例, T 是该 pixel 剩余透射率
+			if (test_T < 0.0001f) { // 该 pixel 已经不能继续透射光线了, 即不会再接受别的高斯体影响, 即渲染完成, done=True
 				done = true;
 				continue;
 			}
 
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
+				//features[collected_id[j] * CHANNELS + ch] 是该高斯投影圆心 ch 通道的值
+				// 这个值首先要受到在该 pixel 处的不透明度的影响, 其次要受到该 pixel 剩余透射率的影响
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
 
+			// 同理, 累计该 pixel 处的反深度值
 			if(invdepth)
-			expected_invdepth += (1 / depths[collected_id[j]]) * alpha * T;
+				expected_invdepth += (1 / depths[collected_id[j]]) * alpha * T;
 
 			T = test_T;
 
@@ -422,15 +448,15 @@ renderCUDA(
 
 	// All threads that treat valid pixel write out their final
 	// rendering data to the frame and auxiliary buffers.
-	if (inside)
+	if (inside) // 运行到这里, 如果 inside=True, 说明该 pixel 已经渲染完毕
 	{
 		final_T[pix_id] = T;
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
-			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
+			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch]; // 颜色 + 背景颜色
 
 		if (invdepth)
-		invdepth[pix_id] = expected_invdepth;// 1. / (expected_depth + T * 1e3);
+			invdepth[pix_id] = expected_invdepth;// 1. / (expected_depth + T * 1e3);
 	}
 }
 
@@ -444,8 +470,8 @@ void FORWARD::render(
 	const float2* means2D,			// [P 2] 高斯投影圆心的 2D 坐标
 	const float* colors,			// [P 3] 高斯投影圆心的 RGB 颜色
 	const float4* conic_opacity,	// 高斯投影椭圆的 2D 协方差矩阵的逆矩阵 + 3D 高斯体的不透明度
-	float* final_T,							// NOTE: ?
-	uint32_t* n_contrib,					// NOTE: ?
+	float* final_T,							// 每个 pixel 的剩余透射率 (要往里填东西)
+	uint32_t* n_contrib,					// 实际影响到该 pixel 的高斯体实例数量 (要往里填东西)
 	const float* bg_color,			// 背景颜色
 	float* out_color,						// 渲染图像 (要往里填东西)
 	float* depths,					// [P] 高斯投影深度

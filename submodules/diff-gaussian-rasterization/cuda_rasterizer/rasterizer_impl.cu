@@ -382,8 +382,8 @@ int CudaRasterizer::Rasterizer::forward(
 	// imgState.ranges[t] 中的 t 表示 tildID
 	// 前面的 binningState.point_list_keys 不是已经排好序, 存储了 (tildeID, depth) 的键值对了吗?
 	// imgState.ranges[t].x 表示 t 这个 tile 在 point_list_keys 中的起始位置
-	// imgState.ranges[t].y 表示 t 这个 tile 在 point_list_keys 中的结束位置
-	// 比如 point_list_keys = [(0, 1), (0, 2), (1, 0)], 那么 imgState.ranges[0].x = 0, imgState.ranges[0].y = 1
+	// imgState.ranges[t].y 表示 t 这个 tile 在 point_list_keys 中的结束位置+1
+	// 比如 point_list_keys = [(0, 1), (0, 2), (0, 3), (1, 0)], 那么 imgState.ranges[0].x = 0, imgState.ranges[0].y = 3 (左闭右开)
 	if (num_rendered > 0)
 		identifyTileRanges << <(num_rendered + 255) / 256, 256 >> > (
 			num_rendered,
@@ -404,8 +404,8 @@ int CudaRasterizer::Rasterizer::forward(
 			geomState.means2D,			// [P 2] 高斯投影圆心的 2D 坐标
 			feature_ptr,				// [P 3] 高斯投影圆心的 RGB 颜色
 			geomState.conic_opacity,	// 高斯投影椭圆的 2D 协方差矩阵的逆矩阵 + 3D 高斯体的不透明度
-			imgState.accum_alpha,				// NOTE: ?
-			imgState.n_contrib,					// NOTE: ?
+			imgState.accum_alpha,				// 每个 pixel 的剩余透射率 (要往里填东西)
+			imgState.n_contrib,					// 实际影响到该 pixel 的高斯体实例数量 (要往里填东西)
 			background,					// 背景颜色
 			out_color,							// 渲染图像 (要往里填东西)
 			geomState.depths,			// [P] 高斯投影深度
