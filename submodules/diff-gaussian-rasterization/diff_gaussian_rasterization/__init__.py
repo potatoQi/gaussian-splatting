@@ -107,16 +107,39 @@ class _RasterizeGaussians(torch.autograd.Function):
             invdepths,
             accum_alpha,
             gauss_sum,
-            gauss_count
+            gauss_count,
+            last_contr_gauss,
+            depths,
         ) = _C.rasterize_gaussians(*args)
         # num_rendered: 渲染动作的总次数
         # color: [3 H W], 渲染图
         # radii: [P], 每个高斯投影圆心半径
         # invdepths: [1 H W], 反深度图
+        # 自己传的
         # accum_alpha: [1 H W], 每个 pixel 的剩余透射率
         # gauss_sum: [P], 每个高斯体所有射线到它的透射率总和
         # gauss_count: [P], 每个高斯体有多少射线投射到它上面
-        
+        # last_contr_gauss: [1 H W], 每个 pixel 上最后一个高斯体的索引
+        # depths: [P], 每个高斯体的深度值
+
+        # 功能 1 测试代码 (若要开启测试请先把 forward.cu 中的 TEST 测试代码打开)
+        # idx_goal = torch.argmax(depths).item()
+        # n = len(radii)
+        # last_contr_gauss = last_contr_gauss.view(-1).cpu().tolist()
+        # accum_alpha = accum_alpha.view(-1).cpu().tolist()
+        # summ = 0.
+        # count = 0.
+        # for idx, val in enumerate(last_contr_gauss):
+        #     assert -1 <= val < n, f"last_contr_gauss[{idx}] = {val} out of range [0, {n})"
+        #     if val == idx_goal:
+        #         summ += accum_alpha[idx]
+        #         count += 1
+        # if count != 0:
+        #     avg1 = summ / count
+        #     avg2 = gauss_sum[idx_goal] / float(gauss_count[idx_goal])
+        #     assert abs(avg1 - avg2) <= 1e-4, (f"Mismatch at gauss[{idx_goal}]: {avg1} vs {avg2}")
+        # else:
+        #     assert gauss_sum[idx_goal] == 0, f"Mismatch at gauss[{idx_goal}]: {gauss_sum[idx_goal]} vs 0"
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings

@@ -174,13 +174,14 @@ __global__ void preprocessCUDA(
 	int* radii,								// [P] 每个高斯点投影半径 (要往里填东西)
 	float2* points_xy_image,				// [P 2] 输出的 2D 投影中心
 	float* depths,							// [P] 每个高斯点的深度 (要往里填东西)
-	float* cov3Ds,							// [P 6] 输出的协方差矩阵 (如果没预传 cov3D_precomp, 就输出到这里)
+	float* cov3Ds,							// [P 6] 输出的协方差矩阵 (若没预传 cov3D_precomp, 就输出到这里)
 	float* rgb,								// [P 3] 输出的投影点 RGB 颜色 (如果没预传 colors_precomp, 就输出到这里)
 	float4* conic_opacity,					// 输出的 2D 协方差矩阵的逆矩阵 和 输入的透明度
 	const dim3 grid,				// 所需 blocks 数量
 	uint32_t* tiles_touched,				// [P] 输出的每个投影点影响到的 tile 数量
 	bool prefiltered,				// 是否开启预滤波
-	bool antialiasing				// 是否开启抗锯齿
+	bool antialiasing,				// 是否开启抗锯齿
+	float* out_depths
 ) {
 	// 分配一个 thread 编号
 	auto idx = cg::this_grid().thread_rank();
@@ -291,6 +292,7 @@ __global__ void preprocessCUDA(
 	// Store some useful helper data for the next steps.
 	// 噢所以它拿的深度值其实是相机坐标系下的 z 轴值, 而不是 ndc 坐标系里的 z 轴值
 	depths[idx] = p_view.z;
+	out_depths[idx] = p_view.z;
 	// my_radius 是近似圆的半径
 	radii[idx] = my_radius;
 	// point_image 是高斯点投影到屏幕上的坐标
@@ -325,7 +327,9 @@ renderCUDA(
 	const float* __restrict__ depths,				// [P] 高斯投影深度
 	float* __restrict__ invdepth,							// 反深度图 (要往里填东西)
 	float* __restrict__ gauss_sum,
-	int* __restrict__ gauss_count
+	int* __restrict__ gauss_count,
+	int* __restrict__ last_contr_gauss,
+	float* __restrict__ out_accum_alpha
 ) {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -408,13 +412,20 @@ renderCUDA(
 			// Resample using conic matrix (cf. "Surface 
 			// Splatting" by Zwicker et al., 2001)
 			// 下面就是计算出一个 power, 这个 power 的取值跟是否这个高斯实例会对当前 pixel 产生影响有关
-			int idx_gaussian = collected_id[j];	// 该高斯体实例的索引
 			float2 xy = collected_xy[j];	// 该高斯体实例的投影圆心坐标
 			float2 d = { xy.x - pixf.x, xy.y - pixf.y };
 			float4 con_o = collected_conic_opacity[j];
 			float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 			if (power > 0.0f)
 				continue;
+
+			// 运行到这里说明光线已经砸到了当前高斯体头上
+			int idx_gaussian = collected_id[j];	// 该高斯体实例的索引
+			// 把 test_T 累加到下标为 idx_gaussian 的高斯体上去, 然后该高斯体的 count++
+			// 这里用原子操作是因为可能有多个 pixel 同时命中同一个 idx_gaussian, 而 += 这个操作会先读一个旧值然后加新值再存回去, 同时命中会导致数据错乱
+			// 所以就用原子操作
+			atomicAdd(&gauss_sum[idx_gaussian], T);
+			atomicAdd(&gauss_count[idx_gaussian], 1);
 
 			// Eq. (2) from 3D Gaussian splatting paper.
 			// Obtain alpha by multiplying with Gaussian opacity
@@ -426,16 +437,14 @@ renderCUDA(
 			if (alpha < 1.0f / 255.0f)
 				continue; // 如果 alpha < 1/255, 说明该高斯体对于该 pixel 来说太透明了, 没影响, 直接 continue
 			float test_T = T * (1 - alpha); // 1-α 代表应该削弱的比例, T 是该 pixel 剩余透射率
-			if (test_T < 0.0001f) { // 该 pixel 已经不能继续透射光线了, 即不会再接受别的高斯体影响, 即渲染完成, done=True
+			if (test_T < 0.0001f) { // 该 pixel 已经不能继续透射光线了, 即不会再接受当前以及以后别的高斯体影响, 即渲染完成, done=True
 				done = true;
 				continue;
 			}
 
-			// 把 test_T 累加到下标为 idx_gaussian 的高斯体上去, 然后该高斯体的 count++
-			// 这里用原子操作是因为可能有多个 pixel 同时命中同一个 idx_gaussian, 而 += 这个操作会先读一个旧值然后加新值再存回去, 同时命中会导致数据错乱
-			// 所以就用原子操作
-			atomicAdd(&gauss_sum[idx_gaussian], test_T);
-			atomicAdd(&gauss_count[idx_gaussian], 1);
+			// TEST: 功能 1 的测试代码, 若开启请把上面两行原子操作注释掉
+			// atomicAdd(&gauss_sum[idx_gaussian], test_T);
+			// atomicAdd(&gauss_count[idx_gaussian], 1);
 
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
@@ -452,14 +461,15 @@ renderCUDA(
 			// Keep track of last range entry to update this
 			// pixel.
 			last_contributor = contributor;
+			last_contr_gauss[pix_id] = idx_gaussian;
 		}
 	}
 
 	// All threads that treat valid pixel write out their final
 	// rendering data to the frame and auxiliary buffers.
-	if (inside) // 运行到这里, 如果 inside=True, 说明该 pixel 已经渲染完毕
-	{
+	if (inside) {	// 运行到这里, 如果 inside=True, 说明该 pixel 已经渲染完毕 
 		final_T[pix_id] = T;
+		out_accum_alpha[pix_id] = T;
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch]; // 颜色 + 背景颜色
@@ -486,7 +496,9 @@ void FORWARD::render(
 	float* depths,					// [P] 高斯投影深度
 	float* depth,							// 反深度图 (要往里填东西)
 	float* gauss_sum,
-	int* gauss_count
+	int* gauss_count,
+	int* last_contr_gauss,
+	float* out_accum_alpha
 ) {
 	// 并行处理每个像素
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
@@ -504,7 +516,9 @@ void FORWARD::render(
 		depths, 
 		depth,
 		gauss_sum,
-		gauss_count
+		gauss_count,
+		last_contr_gauss,
+		out_accum_alpha
 	);
 }
 
@@ -539,7 +553,8 @@ void FORWARD::preprocess(
 	const dim3 grid,				// 所需 blocks 数量
 	uint32_t* tiles_touched,				// [P] 输出的每个投影点影响到的 tile 数量
 	bool prefiltered,				// 是否开启预滤波
-	bool antialiasing				// 是否开启抗锯齿
+	bool antialiasing,				// 是否开启抗锯齿
+	float* out_depths
 ) {
 	// <NUM_CHANNELS> 是模板参数, 会传给 preprocessCUDA 的 C
 	// lauch kernel, 有 (P+255)/256 个 block, 每个 block 有 256 个 thread
@@ -575,6 +590,7 @@ void FORWARD::preprocess(
 		grid,
 		tiles_touched,
 		prefiltered,
-		antialiasing
+		antialiasing,
+		out_depths
 	);
 }

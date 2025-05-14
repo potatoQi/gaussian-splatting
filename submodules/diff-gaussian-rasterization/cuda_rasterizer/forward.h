@@ -21,7 +21,8 @@
 namespace FORWARD
 {
 	// Perform initial steps for each Gaussian prior to rasterization.
-	void preprocess(int P, int D, int M,
+	void preprocess(
+		int P, int D, int M,
 		const float* orig_points,
 		const glm::vec3* scales,
 		const float scale_modifier,
@@ -46,7 +47,9 @@ namespace FORWARD
 		const dim3 grid,
 		uint32_t* tiles_touched,
 		bool prefiltered,
-		bool antialiasing);
+		bool antialiasing,
+		float* out_depths
+	);
 
 	// Main rasterization method.
 	void render(
@@ -64,7 +67,9 @@ namespace FORWARD
 		float* depths,
 		float* depth,
 		float* gauss_sum,
-		int* gauss_count
+		int* gauss_count,
+		int* last_contr_gauss,
+		float* out_accum_alpha
 	);
 }
 

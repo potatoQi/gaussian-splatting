@@ -55,7 +55,9 @@ namespace CudaRasterizer
 			bool debug = false,
 			float* out_accum_alpha = nullptr,
 			float* gauss_sum = nullptr,
-			int* gauss_count = nullptr
+			int* gauss_count = nullptr,
+			int* last_contr_gauss = nullptr,
+			float* out_depth = nullptr
 		);
 
 		static void backward(

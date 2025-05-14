@@ -225,7 +225,9 @@ int CudaRasterizer::Rasterizer::forward(
 	bool debug,								// 是否开启 debug 模式
 	float* out_accum_alpha,// 每个 pixel 的剩余透射率 (要往里填东西)
 	float* gauss_sum,
-	int* gauss_count
+	int* gauss_count,
+	int* last_contr_gauss,
+	float* out_depths
 ) {
 	// 想象一个针孔相机, 光线从物体经过针孔, 打到后面的成像平面, 焦距就是针孔到成像平面之间的距离
 	// f 越大, 成像平面离针孔远，投影的物体看上去“更大”、视野更窄（长焦）。
@@ -309,7 +311,8 @@ int CudaRasterizer::Rasterizer::forward(
 			tile_grid,					// (gridX,gridY,1)——屏幕被划分成多少个 tile
 			geomState.tiles_touched,				// [P] 输出的每个投影点影响到的 tile 数量
 			prefiltered,				// 是否开启预滤波
-			antialiasing				// 是否开启抗锯齿
+			antialiasing,				// 是否开启抗锯齿
+			out_depths
 		),
 		debug
 	)
@@ -414,13 +417,12 @@ int CudaRasterizer::Rasterizer::forward(
 			geomState.depths,			// [P] 高斯投影深度
 			depth,								// 反深度图 (要往里填东西)
 			gauss_sum,
-			gauss_count
+			gauss_count,
+			last_contr_gauss,
+			out_accum_alpha
 		),
 		debug
 	)
-
-	// 把每个 pixel 的剩余透射率返回回去
-	out_accum_alpha = imgState.accum_alpha;
 
 	// 渲染动作的总次数
 	return num_rendered;
