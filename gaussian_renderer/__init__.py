@@ -138,7 +138,7 @@ def render(
         # BUG: separate_sh 我感觉是不支持的, 因为这里传了 dc 参数进去, 但是 GaussianRasterizer 的 forward 函数里并没有用到 dc 这个参数
         rendered_image, radii, depth_image = rasterizer(
             means3D = means3D,                          # 所有高斯体的 3D 坐标 [N 3]
-            means2D = means2D,                          # [N 3] 的屏幕空间占位张量, 光栅器会往里写入 (x, y) 投影坐标
+            means2D = means2D,                          # 感觉就一容器变量, 负责在 backward 里接收 grad_means2D, 在 forward 过程中没用到
             dc = dc,                                    # 低频 sh 系数
             shs = shs,                                  # 高频 sh 系数
             colors_precomp = colors_precomp,            # 预先计算好的 RGB 颜色 (若有)
@@ -156,7 +156,7 @@ def render(
             gauss_count,
         ) = rasterizer(
             means3D = means3D,                          # 所有高斯体的 3D 坐标 [N 3]
-            means2D = means2D,                          # [N 3] 的屏幕空间占位张量, 光栅器会往里写入 (x, y) 投影坐标
+            means2D = means2D,                          # 感觉就一容器变量, 负责在 backward 里接收 grad_means2D, 在 forward 过程中没用到
             shs = shs,                                  # sh 系数
             colors_precomp = colors_precomp,            # 预先计算好的 RGB 颜色 (若有)
             opacities = opacity,                        # 所有高斯体的不透明度
@@ -164,6 +164,7 @@ def render(
             rotations = rotations,                      # 每个高斯体的旋转变量
             cov3D_precomp = cov3D_precomp               # 预先计算好的协方差矩阵 (若有)
         )
+        # rasterizer 里的 input 参数在运行完上面这句话后都会拿到 loss 对自己的梯度
         
     # Apply exposure to rendered image (training only)
     # 是否对整张 RGB 图像做一次曝光补偿

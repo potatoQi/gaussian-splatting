@@ -60,8 +60,8 @@ class _RasterizeGaussians(torch.autograd.Function):
     def forward(
         ctx,
         means3D,            # 所有高斯体的 3D 坐标 [N 3]
-        means2D,            # [N 3] 的屏幕空间占位张量, 光栅器会往里写入 (x, y) 投影坐标
-        sh,                 # sh 系数
+        means2D,            # 感觉就一容器变量, 负责在 backward 里接收 grad_means2D, 在 forward 过程中没用到
+        sh,                 # sh 系数 [P M D(3)]
         colors_precomp,     # 预先计算好的 RGB 颜色 (若有)
         opacities,          # 所有高斯体的不透明度
         scales,             # 每个高斯体的尺度 (在 xyz 轴的缩放长度)
@@ -87,7 +87,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.tanfovy,            # 单位深度处的半高度
             raster_settings.image_height,       # 输出图像的像素高
             raster_settings.image_width,        # 输出图像的像素宽
-            sh,                                 # sh 系数
+            sh,                                 # sh 系数 [P M D(3)]
             raster_settings.sh_degree,          # 球谐函数阶数
             raster_settings.campos,             # 相机在世界里的坐标
             raster_settings.prefiltered,        # 表示你是否已经在别的地方对颜色做过“预滤波”（模糊、降采样）处理。这里设为 False，让 rasterizer 自己来处理
@@ -115,7 +115,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         # color: [3 H W], 渲染图
         # radii: [P], 每个高斯投影圆心半径
         # invdepths: [1 H W], 反深度图
-        # 自己传的
+        # 以下为自己传的:
         # accum_alpha: [1 H W], 每个 pixel 的剩余透射率
         # gauss_sum: [P], 每个高斯体所有射线到它的透射率总和
         # gauss_count: [P], 每个高斯体有多少射线投射到它上面
@@ -141,10 +141,10 @@ class _RasterizeGaussians(torch.autograd.Function):
         # else:
         #     assert gauss_sum[idx_goal] == 0, f"Mismatch at gauss[{idx_goal}]: {gauss_sum[idx_goal]} vs 0"
 
-        # Keep relevant tensors for backward
+        # 保存非张量属性
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
-        # 把那些需要存储梯度反向更新的变量都放到 ctx.save_for_backward 里
+        # 保存要参与梯度计算的张量
         ctx.save_for_backward(
             colors_precomp,         # 预先计算好的 RGB 颜色 (若有)
             means3D,                # 所有高斯体的 3D 坐标 [N 3]
@@ -152,7 +152,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             rotations,              # 每个高斯体的旋转变量
             cov3Ds_precomp,         # 预先计算好的协方差矩阵 (若有)
             radii,                  # 高斯体投影到屏幕上的像素半径
-            sh,                     # sh 系数
+            sh,                     # sh 系数 [P M D(3)]
             opacities,              # 所有高斯体的不透明度
             geomBuffer,
             binningBuffer,
@@ -161,6 +161,8 @@ class _RasterizeGaussians(torch.autograd.Function):
         
         return color, radii, invdepths, gauss_sum, gauss_count
 
+    # 现在就是有 loss 对 forward 里 return 的那几个 tensor 的梯度, 这几个梯度就是 backward 的 input
+    # 然后你要利用这些 input 求出 loss 对 .apply(...) 里所有参数的梯度
     @staticmethod
     def backward(
         ctx,
@@ -173,7 +175,19 @@ class _RasterizeGaussians(torch.autograd.Function):
         # 恢复对应 forward 里通过 ctx.save_for_backward 保存的变量
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
-        colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
+        (
+            colors_precomp,        # 预先计算好的 RGB 颜色 (若有)
+            means3D,               # 所有高斯体的 3D 坐标 [N 3]
+            scales,                # 每个高斯体的尺度 (在 xyz 轴的缩放长度)
+            rotations,             # 每个高斯体的旋转变量
+            cov3Ds_precomp,        # 预先计算好的协方差矩阵 (若有)
+            radii,                 # 高斯体投影到屏幕上的像素半径
+            sh,                    # sh 系数 [P M D(3)]
+            opacities,             # 所有高斯体的不透明度
+            geomBuffer,
+            binningBuffer,
+            imgBuffer
+        ) = ctx.saved_tensors
 
         # Restructure args as C++ method expects them
         # 同样的, 把需要的参数重新打包成一个元组顺序, 方便传递给 C++ 端
@@ -193,7 +207,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.tanfovy,            # 单位深度处的半高度
             grad_out_color,                     # 对渲染图 color 的梯度
             grad_out_depth,                     # 对反深度图 invdepths 的梯度
-            sh,                                 # sh 系数
+            sh,                                 # sh 系数 [P M D(3)]
             raster_settings.sh_degree,          # 球谐函数阶数
             raster_settings.campos,             # 相机在世界里的坐标
             geomBuffer,
@@ -206,11 +220,20 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         # Compute gradients for relevant tensors by invoking backward method
         # 拿到 8 个梯度, 这 8 个梯度就分别对应着 forward 输入的前 8 个参数
-        grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _C.rasterize_gaussians_backward(*args)        
+        (
+            grad_means2D,
+            grad_colors_precomp,
+            grad_opacities,
+            grad_means3D,
+            grad_cov3Ds_precomp,
+            grad_sh,
+            grad_scales,
+            grad_rotations
+        ) = _C.rasterize_gaussians_backward(*args)        
 
         grads = (
             grad_means3D,           # 对所有高斯体的 3D 坐标 [N 3] 的梯度
-            grad_means2D,           # 对 [N 3] 的屏幕空间占位张量的梯度
+            grad_means2D,           # NOTE: ?
             grad_sh,                # 对 sh 系数的梯度
             grad_colors_precomp,    # 对预先计算好的 RGB 颜色 (若有) 的梯度
             grad_opacities,         # 对所有高斯体的不透明度的梯度
@@ -256,9 +279,9 @@ class GaussianRasterizer(nn.Module):
     def forward(
         self,
         means3D,                    # 所有高斯体的 3D 坐标 [N 3]
-        means2D,                    # [N 3] 的屏幕空间占位张量, 光栅器会往里写入 (x, y) 投影坐标
+        means2D,                    # 感觉就一容器变量, 负责在 backward 里接收 grad_means2D, 在 forward 过程中没用到
         opacities,                  # 所有高斯体的不透明度
-        shs = None,                 # sh 系数
+        shs = None,                 # sh 系数 [P M D(3)]
         colors_precomp = None,      # 预先计算好的 RGB 颜色 (若有)
         scales = None,              # 每个高斯体的尺度 (在 xyz 轴的缩放长度)
         rotations = None,           # 每个高斯体的旋转变量
@@ -289,8 +312,8 @@ class GaussianRasterizer(nn.Module):
         # 准备进入 cppcuda 咯~
         return rasterize_gaussians(
             means3D,            # 所有高斯体的 3D 坐标 [N 3]
-            means2D,            # [N 3] 的屏幕空间占位张量, 光栅器会往里写入 (x, y) 投影坐标
-            shs,                # sh 系数
+            means2D,            # 感觉就一容器变量, 负责在 backward 里接收 grad_means2D, 在 forward 过程中没用到
+            shs,                # sh 系数 [P M D(3)]
             colors_precomp,     # 预先计算好的 RGB 颜色 (若有)
             opacities,          # 所有高斯体的不透明度
             scales,             # 每个高斯体的尺度 (在 xyz 轴的缩放长度)

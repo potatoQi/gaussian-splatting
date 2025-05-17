@@ -205,7 +205,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const int width,						// 图像宽度
 	const int height,						// 图像高度
 	const float* means3D,					// 高斯点的 3D 坐标 [P 3]
-	const float* shs,						// sh 系数
+	const float* shs,						// sh 系数 [P M D(3)]
 	const float* colors_precomp,			// 预先计算好的 RGB 颜色 (若有)
 	const float* opacities,					// 所有高斯体的不透明度
 	const float* scales,					// 每个高斯体的尺度 (在 xyz 轴的缩放长度)
@@ -289,7 +289,7 @@ int CudaRasterizer::Rasterizer::forward(
 			scale_modifier,				// 控制高斯体们的尺寸, 缩放因子
 			(glm::vec4*)rotations,		// 每个高斯体的旋转变量
 			opacities,					// 所有高斯体的不透明度
-			shs,						// sh 系数
+			shs,						// sh 系数 [P M D(3)]
 			geomState.clamped,						// [P 3] 每个高斯点的 R/G/B 通道的值是否被 clamped 的标志位 (待写入)
 			cov3D_precomp,				// 预先计算好的协方差矩阵 (若有)
 			colors_precomp,				// 预先计算好的 RGB 颜色 (若有)
@@ -431,40 +431,56 @@ int CudaRasterizer::Rasterizer::forward(
 // Produce necessary gradients for optimization, corresponding
 // to forward render pass
 void CudaRasterizer::Rasterizer::backward(
-	const int P, int D, int M, int R,
-	const float* background,
-	const int width, int height,
-	const float* means3D,
-	const float* shs,
-	const float* colors_precomp,
-	const float* opacities,
-	const float* scales,
-	const float scale_modifier,
-	const float* rotations,
-	const float* cov3D_precomp,
-	const float* viewmatrix,
-	const float* projmatrix,
-	const float* campos,
-	const float tan_fovx, float tan_fovy,
-	const int* radii,
-	char* geom_buffer,
-	char* binning_buffer,
-	char* img_buffer,
-	const float* dL_dpix,
-	const float* dL_invdepths,
-	float* dL_dmean2D,
-	float* dL_dconic,
-	float* dL_dopacity,
-	float* dL_dcolor,
-	float* dL_dinvdepth,
-	float* dL_dmean3D,
-	float* dL_dcov3D,
-	float* dL_dsh,
-	float* dL_dscale,
-	float* dL_drot,
-	bool antialiasing,
-	bool debug)
-{
+	// 基本尺寸参数
+	const int P,				// 高斯点数量
+	const int D,				// sh 的阶数
+	const int M,				// sh 系数的数量
+	const int R,				// 前向所有 (tileID, depth) pairs 的个数
+
+	// 前向需要的常量输入 (只读)
+	const float* background,			// 背景颜色
+	const int width,					// 图像宽度
+	const int height,					// 图像高度
+	const float* means3D,				// 高斯点的 3D 坐标 [P 3]
+	const float* shs,					// sh 系数 [P M D]
+	const float* colors_precomp,		// 预先计算好的 RGB 颜色 (若有)
+	const float* opacities,				// 所有高斯体的不透明度
+	const float* scales,				// 每个高斯体的尺度 (在 xyz 轴的缩放长度)
+	const float scale_modifier,			// 控制高斯体们的尺寸, 缩放因子
+	const float* rotations,				// 每个高斯体的旋转变量
+	const float* cov3D_precomp,			// 预先计算好的协方差矩阵 (若有)
+	const float* viewmatrix,			// 视图矩阵
+	const float* projmatrix,			// 投影矩阵
+	const float* campos,				// 相机在世界里的坐标
+	const float tan_fovx,				// 单位深度处的半宽度
+	const float tan_fovy,				// 单位深度处的半高度
+
+	// 前向算出的中间量
+	const int* radii,				// [P] 每个高斯点投影半径
+	char* geom_buffer,				// geomBuffer
+	char* binning_buffer,			// binningBuffer
+	char* img_buffer,				// imageBuffer
+
+	// 从 Python 端传回的 loss 对 forward 输出的梯度
+	const float* dL_dpix,			// loss 对渲染 RGB 图像的梯度 [3 H W]
+	const float* dL_invdepths,		// loss 对反深度图的梯度 [1 H W]
+
+	// 需要往里写入值的梯度
+	float* dL_dmean2D,			// NOTE: ?
+	float* dL_dconic,			// loss 对高斯点 2D 协方差逆矩阵的梯度 [P 2 2]
+	float* dL_dopacity,			// loss 对高斯点不透明度的梯度 [P 1]
+	float* dL_dcolor,			// loss 对预先计算好的 RGB 颜色的梯度 [P 3]
+	float* dL_dinvdepth,		// loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+	float* dL_dmean3D,			// loss 对高斯点 3D 坐标的梯度 [P 3]
+	float* dL_dcov3D,			// loss 对预先计算好的协方差的矩阵 (若有) 的梯度 [P 6]
+	float* dL_dsh,				// loss 对 sh 系数的梯度 [P M D]
+	float* dL_dscale,			// loss 对每个高斯体的尺度 (在 xyz 轴的缩放长度) 的梯度 [P 3]
+	float* dL_drot,				// loss 对每个高斯体的旋转变量的梯度 [P 4]
+
+	// 额外开关
+	bool antialiasing,	// 是否开启抗锯齿
+	bool debug			// 是否开启 debug 模式
+) {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
 	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
 	ImageState imgState = ImageState::fromChunk(img_buffer, width * height);
