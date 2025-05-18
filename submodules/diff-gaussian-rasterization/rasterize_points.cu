@@ -229,8 +229,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	}
 
 	torch::Tensor dL_dmeans3D = torch::zeros({P, 3}, means3D.options());			// loss 对高斯点 3D 坐标的梯度 [P 3]
-	torch::Tensor dL_dmeans2D = torch::zeros({P, 3}, means3D.options());			// NOTE: ?
-	torch::Tensor dL_dcolors = torch::zeros({P, NUM_CHANNELS}, means3D.options());	// loss 对预先计算好的 RGB 颜色的梯度 (要么走这条路, 要么走下面的 dL_dsh)
+	torch::Tensor dL_dmeans2D = torch::zeros({P, 3}, means3D.options());			// loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
+	torch::Tensor dL_dcolors = torch::zeros({P, NUM_CHANNELS}, means3D.options());	// loss 对高斯点 RGB 颜色的梯度 [P 3]
 	torch::Tensor dL_dconic = torch::zeros({P, 2, 2}, means3D.options());			// loss 对高斯点 2D 协方差逆矩阵的梯度 [P 2 2]
 	torch::Tensor dL_dopacity = torch::zeros({P, 1}, means3D.options());			// loss 对高斯体不透明度的梯度
 	torch::Tensor dL_dcov3D = torch::zeros({P, 6}, means3D.options());				// loss 对预先计算好的协方差的矩阵 (若有) 的梯度 (要么走这条路, 要么走下面的 dL_dscales, dL_drotations)
@@ -294,10 +294,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 			dL_dout_invdepthptr,							// loss 对反深度图的梯度 [1 H W]
 
 			// 需要往里写入值的梯度
-			dL_dmeans2D.contiguous().data<float>(),				// NOTE: ?
+			dL_dmeans2D.contiguous().data<float>(),				// loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
 			dL_dconic.contiguous().data<float>(),  				// loss 对高斯点 2D 协方差逆矩阵的梯度 [P 2 2]
 			dL_dopacity.contiguous().data<float>(),				// loss 对高斯体不透明度的梯度 [P 1]
-			dL_dcolors.contiguous().data<float>(),				// loss 对预先计算好的 RGB 颜色的梯度 [P 3]
+			dL_dcolors.contiguous().data<float>(),				// loss 对高斯点 RGB 颜色的梯度 [P 3]
 			dL_dinvdepthsptr,									// loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
 			dL_dmeans3D.contiguous().data<float>(),				// loss 对高斯点 3D 坐标的梯度 [P 3]
 			dL_dcov3D.contiguous().data<float>(),				// loss 对预先计算好的协方差的矩阵 (若有) 的梯度 [P 6]
@@ -312,8 +312,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	}
 
 	return std::make_tuple(
-		dL_dmeans2D,			// NOTE: ?
-		dL_dcolors,				// loss 对预先计算好的 RGB 颜色的梯度
+		dL_dmeans2D,			// loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
+		dL_dcolors,				// loss 对高斯点 RGB 颜色的梯度 [P 3]
 		dL_dopacity,			// loss 对高斯体不透明度的梯度
 		dL_dmeans3D,			// loss 对高斯点 3D 坐标的梯度
 		dL_dcov3D,				// loss 对预先计算好的协方差的矩阵 (若有) 的梯度

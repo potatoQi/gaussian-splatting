@@ -144,33 +144,36 @@ __device__ void computeColorFromSH(int idx, int deg, int max_coeffs, const glm::
 // Backward version of INVERSE 2D covariance matrix computation
 // (due to length launched as separate kernel before other 
 // backward steps contained in preprocess)
-__global__ void computeCov2DCUDA(int P,
-	const float3* means,
-	const int* radii,
-	const float* cov3Ds,
-	const float h_x, float h_y,
-	const float tan_fovx, float tan_fovy,
-	const float* view_matrix,
-	const float* opacities,
-	const float* dL_dconics,
-	float* dL_dopacity,
-	const float* dL_dinvdepth,
-	float3* dL_dmeans,
-	float* dL_dcov,
-	bool antialiasing)
-{
+__global__ void computeCov2DCUDA(
+	int P,							// 高斯体数量
+	const float3* means,			// [P 3] 高斯体的 3D 坐标
+	const int* radii,				// [P] 每个高斯点的投影半径
+	const float* cov3Ds,			// 3D 协方差矩阵
+	const float h_x,				// x 轴焦距
+	const float h_y,				// y 轴焦距
+	const float tan_fovx,			// 单位深度处的半宽度
+	const float tan_fovy,			// 单位深度处的半高度
+	const float* view_matrix,		// 视图矩阵
+	const float* opacities,			// 高斯体的不透明度
+	const float* dL_dconics,		// loss 对高斯点 2D 协方差逆矩阵的梯度 [P 2 2]
+	float* dL_dopacity,				// loss 对高斯点不透明度的梯度 [P 1]
+	const float* dL_dinvdepth,		// loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+	float3* dL_dmeans,						// 输出: loss 对高斯体 3D 坐标的梯度 [P 3]
+	float* dL_dcov,							// 输出: loss 对高斯体 3D 协方差的梯度 [P 6]
+	bool antialiasing
+) {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P || !(radii[idx] > 0))
 		return;
 
-	// Reading location of 3D covariance for this Gaussian
+	// 拿出当前高斯体的协方差矩阵 (6 个数)
 	const float* cov3D = cov3Ds + 6 * idx;
 
 	// Fetch gradients, recompute 2D covariance and relevant 
 	// intermediate forward results needed in the backward.
-	float3 mean = means[idx];
-	float3 dL_dconic = { dL_dconics[4 * idx], dL_dconics[4 * idx + 1], dL_dconics[4 * idx + 3] };
-	float3 t = transformPoint4x3(mean, view_matrix);
+	float3 mean = means[idx];	// 取出世界坐标 (3维)
+	float3 dL_dconic = { dL_dconics[4 * idx], dL_dconics[4 * idx + 1], dL_dconics[4 * idx + 3] };	// 取出 2D 协方差逆矩阵
+	float3 t = transformPoint4x3(mean, view_matrix);	// 得到当前高斯体的相机坐标 (3维)
 	
 	const float limx = 1.3f * tan_fovx;
 	const float limy = 1.3f * tan_fovy;
@@ -397,163 +400,186 @@ __device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const gl
 // (those are handled by a previous kernel call)
 template<int C>
 __global__ void preprocessCUDA(
-	int P, int D, int M,
-	const float3* means,
-	const int* radii,
-	const float* shs,
-	const bool* clamped,
-	const glm::vec3* scales,
-	const glm::vec4* rotations,
-	const float scale_modifier,
-	const float* proj,
-	const glm::vec3* campos,
-	const float3* dL_dmean2D,
-	glm::vec3* dL_dmeans,
-	float* dL_dcolor,
-	float* dL_dcov3D,
-	float* dL_dsh,
-	glm::vec3* dL_dscale,
-	glm::vec4* dL_drot,
-	float* dL_dopacity)
-{
+	int P,							// 高斯体数量
+	int D,							// SH 阶数
+	int M,							// SH 系数数量
+	const float3* means,			// [P 3] 高斯体的 3D 坐标
+	const int* radii,				// [P] 每个高斯点的投影半径
+	const float* shs,				// [P M D] sh 系数
+	const bool* clamped,			// [P 3] 每个高斯点的 R/G/B 通道的值是否被 clamped
+	const glm::vec3* scales,		// [P 3] 每个高斯体的尺度 (在 xyz 轴的缩放长度)
+	const glm::vec4* rotations,		// [P 4] 每个高斯体的旋转变量
+	const float scale_modifier,		// 控制高斯体们的尺寸, 缩放因子
+	const float* proj,				// 投影矩阵
+	const glm::vec3* campos,		// 相机在世界里的坐标
+	const float3* dL_dmean2D,		// loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
+	glm::vec3* dL_dmeans,					// 输出: loss 对高斯点 3D 坐标的梯度 [P 3]
+	float* dL_dcolor,				// loss 对高斯点 RGB 颜色的梯度 [P 3]
+	float* dL_dcov3D,				// loss 对高斯体 3D 协方差的梯度 [P 6]
+	float* dL_dsh,							// 输出: loss 对 sh 系数的梯度 [P M D]
+	glm::vec3* dL_dscale,					// 输出: loss 对每个高斯体的尺度 (在 xyz 轴的缩放长度) 的梯度 [P 3]
+	glm::vec4* dL_drot,						// 输出: loss 对每个高斯体的旋转变量的梯度 [P 4]
+	float* dL_dopacity				// loss 对高斯点不透明度的梯度 [P 1]
+) {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P || !(radii[idx] > 0))
 		return;
 
+	// 取出高斯体的世界坐标 (3 维)
 	float3 m = means[idx];
 
 	// Taking care of gradients from the screenspace points
+	// 拿到未归一化的 ndc 坐标
 	float4 m_hom = transformPoint4x4(m, proj);
-	float m_w = 1.0f / (m_hom.w + 0.0000001f);
+	float m_w = 1.0f / (m_hom.w + 0.0000001f);	// 归一化系数
 
-	// Compute loss gradient w.r.t. 3D means due to gradients of 2D means
-	// from rendering procedure
+	// 下面这段就是把 dL_dmean2D 梯度反传到 dL_dmeans
 	glm::vec3 dL_dmean;
 	float mul1 = (proj[0] * m.x + proj[4] * m.y + proj[8] * m.z + proj[12]) * m_w * m_w;
 	float mul2 = (proj[1] * m.x + proj[5] * m.y + proj[9] * m.z + proj[13]) * m_w * m_w;
 	dL_dmean.x = (proj[0] * m_w - proj[3] * mul1) * dL_dmean2D[idx].x + (proj[1] * m_w - proj[3] * mul2) * dL_dmean2D[idx].y;
 	dL_dmean.y = (proj[4] * m_w - proj[7] * mul1) * dL_dmean2D[idx].x + (proj[5] * m_w - proj[7] * mul2) * dL_dmean2D[idx].y;
 	dL_dmean.z = (proj[8] * m_w - proj[11] * mul1) * dL_dmean2D[idx].x + (proj[9] * m_w - proj[11] * mul2) * dL_dmean2D[idx].y;
-
-	// That's the second part of the mean gradient. Previous computation
-	// of cov2D and following SH conversion also affects it.
 	dL_dmeans[idx] += dL_dmean;
 
-	// Compute gradient updates due to computing colors from SHs
+	// 下面这句就是把 dL_dcolor 梯度反传到 dL_dsh, dL_dmeans
 	if (shs)
-		computeColorFromSH(idx, D, M, (glm::vec3*)means, *campos, shs, clamped, (glm::vec3*)dL_dcolor, (glm::vec3*)dL_dmeans, (glm::vec3*)dL_dsh);
+		computeColorFromSH(
+			idx,					// 当前高斯体的索引
+			D,						// SH 阶数
+			M,						// SH 系数数量
+			(glm::vec3*)means,		// 高斯体的 3D 坐标
+			*campos,				// 相机在世界里的坐标
+			shs,					// [P M D] sh 系数
+			clamped,				// [P 3] 每个高斯点的 R/G/B 通道的值是否被 clamped
+			(glm::vec3*)dL_dcolor,	// loss 对高斯点 RGB 颜色的梯度 [P 3]
+			(glm::vec3*)dL_dmeans,			// 输出: loss 对高斯点 3D 坐标的梯度 [P 3]
+			(glm::vec3*)dL_dsh				// 输出: loss 对 sh 系数的梯度 [P M D]
+		);
 
-	// Compute gradient updates due to computing covariance from scale/rotation
+	// 下面这句就是把 dL_dcov3D 梯度反传到 dL_dscale, dL_drot
 	if (scales)
-		computeCov3D(idx, scales[idx], scale_modifier, rotations[idx], dL_dcov3D, dL_dscale, dL_drot);
+		computeCov3D(
+			idx,					// 当前高斯体的索引
+			scales[idx],			// [3] 当前高斯体的尺度 (在 xyz 轴的缩放长度)
+			scale_modifier,			// 控制高斯体们的尺寸, 缩放因子
+			rotations[idx],			// [4] 当前高斯体的旋转变量
+			dL_dcov3D,				// loss 对高斯体 3D 协方差的梯度 [P 6]
+			dL_dscale,						// 输出: loss 对每个高斯体的尺度 (在 xyz 轴的缩放长度) 的梯度 [P 3]
+			dL_drot							// 输出: loss 对每个高斯体的旋转变量的梯度 [P 4]
+		);
 }
 
 // Backward version of the rendering procedure.
 template <uint32_t C>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
-	const uint2* __restrict__ ranges,
-	const uint32_t* __restrict__ point_list,
-	int W, int H,
-	const float* __restrict__ bg_color,
-	const float2* __restrict__ points_xy_image,
-	const float4* __restrict__ conic_opacity,
-	const float* __restrict__ colors,
-	const float* __restrict__ depths,
-	const float* __restrict__ final_Ts,
-	const uint32_t* __restrict__ n_contrib,
-	const float* __restrict__ dL_dpixels,
-	const float* __restrict__ dL_invdepths,
-	float3* __restrict__ dL_dmean2D,
-	float4* __restrict__ dL_dconic2D,
-	float* __restrict__ dL_dopacity,
-	float* __restrict__ dL_dcolors,
-	float* __restrict__ dL_dinvdepths
-)
-{
+	const uint2* __restrict__ ranges,				// [tileID 2] tile 负责的 pairs 范围, 值是 point_list_keys 中的索引 (左闭右开)
+	const uint32_t* __restrict__ point_list,		// 对应着 point_list_keys 中高斯体的索引 idx
+	int W,											// 图像宽度
+	int H,											// 图像高度
+	const float* __restrict__ bg_color,				// 背景颜色
+	const float2* __restrict__ points_xy_image,		// [P 2] 高斯投影圆心的 2D 坐标
+	const float4* __restrict__ conic_opacity,		// 高斯投影椭圆的 2D 协方差矩阵的逆矩阵 + 3D 高斯体的不透明度
+	const float* __restrict__ colors,				// [P 3] 高斯体投影圆心的 RGB 颜色
+	const float* __restrict__ depths,				// [P] 高斯投影深度
+	const float* __restrict__ final_Ts,				// [P] 每个 pixel 的剩余透射率
+	const uint32_t* __restrict__ n_contrib,			// [P] 该像素光线上穿过的高斯体数量
+	const float* __restrict__ dL_dpixels,			// loss 对渲染 RGB 图像的梯度 [3 H W]
+	const float* __restrict__ dL_invdepths,			// loss 对反深度图的梯度 [1 H W]
+	float3* __restrict__ dL_dmean2D,						// 输出: loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
+	float4* __restrict__ dL_dconic2D,						// 输出: loss 对高斯点 2D 协方差矩阵的梯度 [P 2 2]
+	float* __restrict__ dL_dopacity,						// 输出: loss 对高斯体不透明度的梯度 [P 1]
+	float* __restrict__ dL_dcolors,							// 输出: loss 对高斯点 RGB 颜色的梯度 [P 3]
+	float* __restrict__ dL_dinvdepths						// 输出: loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+) {
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
 	const uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
 	const uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
 	const uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
+	// 当前 thread 对应的 pixel 的二维坐标
 	const uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
+	// 当前 thread 的一维坐标
 	const uint32_t pix_id = W * pix.y + pix.x;
+	// 当前 thread 对应的 pixel 的二维坐标 (浮点)
 	const float2 pixf = { (float)pix.x, (float)pix.y };
 
-	const bool inside = pix.x < W&& pix.y < H;
+	const bool inside = pix.x < W && pix.y < H;
+	bool done = !inside;
+	
+	// 取出这个 pixel 所在的 tile 负责的 pairs 的范围
 	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
 
-	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
-
-	bool done = !inside;
+	// 要做的高斯体数量
 	int toDo = range.y - range.x;
 
-	__shared__ int collected_id[BLOCK_SIZE];
-	__shared__ float2 collected_xy[BLOCK_SIZE];
-	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
-	__shared__ float collected_colors[C * BLOCK_SIZE];
-	__shared__ float collected_depths[BLOCK_SIZE];
+	// 如果一次做 BLOCK_SIZE 个高斯体, 那么做完负责的高斯体需要的轮数
+	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
+	// 下面就是 share-memory, 用处就是每次 256 个 pixel 会把收集到的数据填到 share-memory 里面
+	__shared__ int collected_id[BLOCK_SIZE];				// 高斯体 idx
+	__shared__ float2 collected_xy[BLOCK_SIZE];				// 高斯体投影圆心的 2D 坐标
+	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];	// 高斯体投影椭圆的 2D 协方差矩阵的逆矩阵 + 3D 高斯体的不透明度
+	__shared__ float collected_colors[C * BLOCK_SIZE];		// 高斯体投影圆心的 RGB 颜色
+	__shared__ float collected_depths[BLOCK_SIZE];			// 高斯体投影深度
 
 	// In the forward, we stored the final value for T, the
 	// product of all (1 - alpha) factors. 
 	const float T_final = inside ? final_Ts[pix_id] : 0;
-	float T = T_final;
+	float T = T_final;	// 拿到当前像素的剩余透光率
 
 	// We start from the back. The ID of the last contributing
 	// Gaussian is known from each pixel from the forward.
-	uint32_t contributor = toDo;
-	const int last_contributor = inside ? n_contrib[pix_id] : 0;
+	uint32_t contributor = toDo;									// 当前 pixel 要处理的高斯体数量
+	const int last_contributor = inside ? n_contrib[pix_id] : 0;	// 对当前 pixel 产生贡献的最后一个高斯体编号 (编号从 1 开始)
 
-	float accum_rec[C] = { 0 };
-	float dL_dpixel[C];
-	float dL_invdepth;
-	float accum_invdepth_rec = 0;
-	if (inside)
-	{
+	float dL_dpixel[C];			// 用来存 loss 对当前 pixel RGB 颜色的梯度 [3]
+	float dL_invdepth;			// 用来存 loss 对当前 pixel 反深度的梯度 [1]
+	if (inside) {
 		for (int i = 0; i < C; i++)
 			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
 		if(dL_invdepths)
-		dL_invdepth = dL_invdepths[pix_id];
+			dL_invdepth = dL_invdepths[pix_id];
 	}
+	float accum_rec[C] = { 0 };		// 一个过程量, 后续算梯度会用到
+	float accum_invdepth_rec = 0;	// 一个过程量, 后续算梯度会用到
 
-	float last_alpha = 0;
-	float last_color[C] = { 0 };
-	float last_invdepth = 0;
+	// 下面这三个量, 是在反向遍历的时候, 用来保存上一个被处理到的高斯体的一些属性
+	float last_alpha = 0;			// 上一个高斯体的 alpha
+	float last_color[C] = { 0 };	// 上一个高斯体的颜色
+	float last_invdepth = 0;		// 上一个高斯体的反深度
 
 
 	// Gradient of pixel coordinate w.r.t. normalized 
 	// screen-space viewport corrdinates (-1 to 1)
+	// 因为: x_{pixel} = (x_{ndc} x 0.5 + 0.5) * W
+	// 所以: x_{pixel} 对 x_{ndc} 的导数 = 0.5 * W
+	// 所以下面是存了俩导数
 	const float ddelx_dx = 0.5 * W;
 	const float ddely_dy = 0.5 * H;
 
 	// Traverse all Gaussians
-	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
-	{
+	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE) {
 		// Load auxiliary data into shared memory, start in the BACK
 		// and load them in revers order.
 		block.sync();
-		const int progress = i * BLOCK_SIZE + block.thread_rank();
-		if (range.x + progress < range.y)
-		{
-			const int coll_id = point_list[range.y - progress - 1];
+		const int progress = i * BLOCK_SIZE + block.thread_rank();		// 进度: 表示处理到第几个高斯体实例了
+		if (range.x + progress < range.y) {		// 如果这个 pixel 负责的高斯体实例在该 tile 要处理的高斯体实例范围内
+			const int coll_id = point_list[range.y - progress - 1];		// 倒着拿
 			collected_id[block.thread_rank()] = coll_id;
 			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
 			for (int i = 0; i < C; i++)
 				collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
-
 			if(dL_invdepths)
-			collected_depths[block.thread_rank()] = depths[coll_id];
+				collected_depths[block.thread_rank()] = depths[coll_id];
 		}
 		block.sync();
 
-		// Iterate over Gaussians
-		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
-		{
-			// Keep track of current Gaussian ID. Skip, if this one
-			// is behind the last contributor for this pixel.
-			contributor--;
+		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++) {
+			contributor--;	// contributor-- 对应着 forward 相同地方的 contributor++
+			// 只处理真正最该 pixel 有贡献的高斯体实例
 			if (contributor >= last_contributor)
 				continue;
 
@@ -561,180 +587,195 @@ renderCUDA(
 			const float2 xy = collected_xy[j];
 			const float2 d = { xy.x - pixf.x, xy.y - pixf.y };
 			const float4 con_o = collected_conic_opacity[j];
+			// power 就是二位高斯表达式中 e 头上上个系数
 			const float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+			// 按理说 power 绝对是 <= 0 的, 这里是个保险性检查
 			if (power > 0.0f)
 				continue;
 
-			const float G = exp(power);
-			const float alpha = min(0.99f, con_o.w * G);
+			const float G = exp(power);	// 高斯概率值
+			const float alpha = min(0.99f, con_o.w * G);  // 当前高斯体在此 pixel 上的不透明度 (= 自己的不透明度 * 高斯概率值)
+			// 那些对于该 pixel 的不透明影响度过小的高斯直接 continue (它们在前向过程中也会被 continue 的)
 			if (alpha < 1.0f / 255.0f)
 				continue;
 
+			// ------------ 计算 dL/dc_{now}, dL/dinvdepth_{now}, dL/dα_{now}, dL/dopacity_{now} --------------
+			// 算出 T_{t-1}
 			T = T / (1.f - alpha);
+			// dC/dc_{now} = αT_{t-1}
 			const float dchannel_dcolor = alpha * T;
 
-			// Propagate gradients to per-Gaussian colors and keep
-			// gradients w.r.t. alpha (blending factor for a Gaussian/pixel
-			// pair).
+			// 算 dL/dc_{now} 和 dL/dα_{now}
+			const int global_id = collected_id[j]; // 当前高斯体的 idx
 			float dL_dalpha = 0.0f;
-			const int global_id = collected_id[j];
-			for (int ch = 0; ch < C; ch++)
-			{
-				const float c = collected_colors[ch * BLOCK_SIZE + j];
-				// Update last color (to be used in the next iteration)
+			for (int ch = 0; ch < C; ch++) {
+				const float dL_dchannel = dL_dpixel[ch];
+
+				// 算 dL/dα_{now}
+				const float c = collected_colors[ch * BLOCK_SIZE + j];	// 当前高斯体的颜色 c
 				accum_rec[ch] = last_alpha * last_color[ch] + (1.f - last_alpha) * accum_rec[ch];
 				last_color[ch] = c;
-
-				const float dL_dchannel = dL_dpixel[ch];
 				dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;
-				// Update the gradients w.r.t. color of the Gaussian. 
-				// Atomic, since this pixel is just one of potentially
-				// many that were affected by this Gaussian.
+
+				// 算 dL/dc_{now}
 				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
 			}
-			// Propagate gradients from inverse depth to alphaas and
-			// per Gaussian inverse depths
-			if (dL_dinvdepths)
-			{
-			const float invd = 1.f / collected_depths[j];
-			accum_invdepth_rec = last_alpha * last_invdepth + (1.f - last_alpha) * accum_invdepth_rec;
-			last_invdepth = invd;
-			dL_dalpha += (invd - accum_invdepth_rec) * dL_invdepth;
-			atomicAdd(&(dL_dinvdepths[global_id]), dchannel_dcolor * dL_invdepth);
+
+			// 算 dL/dinvdepth_{now} 和 dL/dα_{now}
+			if (dL_dinvdepths) {
+				// 算 dL/dα_{now}
+				const float invd = 1.f / collected_depths[j];
+				accum_invdepth_rec = last_alpha * last_invdepth + (1.f - last_alpha) * accum_invdepth_rec;
+				last_invdepth = invd;
+				dL_dalpha += (invd - accum_invdepth_rec) * dL_invdepth;
+
+				// 算 dL/dinvdepth_{now}
+				atomicAdd(&(dL_dinvdepths[global_id]), dchannel_dcolor * dL_invdepth);
 			}
 
 			dL_dalpha *= T;
-			// Update last alpha (to be used in the next iteration)
 			last_alpha = alpha;
 
-			// Account for fact that alpha also influences how much of
-			// the background color is added if nothing left to blend
+			// 算 dL/dα_{now}
 			float bg_dot_dpixel = 0;
 			for (int i = 0; i < C; i++)
 				bg_dot_dpixel += bg_color[i] * dL_dpixel[i];
 			dL_dalpha += (-T_final / (1.f - alpha)) * bg_dot_dpixel;
 
+			// 算 dL/dopacity_{now}
+			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 
-			// Helpful reusable temporary variables
+			// ------------ 计算 dL_dmean2D, dL_dconic2D --------------
 			const float dL_dG = con_o.w * dL_dalpha;
 			const float gdx = G * d.x;
 			const float gdy = G * d.y;
 			const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
 			const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
-
-			// Update gradients w.r.t. 2D mean position of the Gaussian
 			atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
 			atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
 
-			// Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
 			atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
-			atomicAdd(&dL_dconic2D[global_id].y, -0.5f * gdx * d.y * dL_dG);
+			atomicAdd(&dL_dconic2D[global_id].y, -0.5f * gdx * d.y * dL_dG);	// 这里的 0.5 不是 bug, 原因见: https://github.com/graphdeco-inria/gaussian-splatting/issues/1096
 			atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
-
-			// Update gradients w.r.t. opacity of the Gaussian
-			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 		}
 	}
 }
 
 void BACKWARD::preprocess(
-	int P, int D, int M,
-	const float3* means3D,
-	const int* radii,
-	const float* shs,
-	const bool* clamped,
-	const float* opacities,
-	const glm::vec3* scales,
-	const glm::vec4* rotations,
-	const float scale_modifier,
-	const float* cov3Ds,
-	const float* viewmatrix,
-	const float* projmatrix,
-	const float focal_x, float focal_y,
-	const float tan_fovx, float tan_fovy,
-	const glm::vec3* campos,
-	const float3* dL_dmean2D,
-	const float* dL_dconic,
-	const float* dL_dinvdepth,
-	float* dL_dopacity,
-	glm::vec3* dL_dmean3D,
-	float* dL_dcolor,
-	float* dL_dcov3D,
-	float* dL_dsh,
-	glm::vec3* dL_dscale,
-	glm::vec4* dL_drot,
-	bool antialiasing)
-{
+	int P,							// 高斯体数量
+	int D,							// SH 阶数
+	int M,							// SH 系数数量
+	const float3* means3D,			// [P 3] 高斯体的 3D 坐标
+	const int* radii,				// [P] 每个高斯点的投影半径
+	const float* shs,				// [P M D] sh 系数
+	const bool* clamped,			// [P 3] 每个高斯点的 R/G/B 通道的值是否被 clamped 的标志位
+	const float* opacities,			// 高斯体的不透明度
+	const glm::vec3* scales,		// [P 3] 每个高斯体的尺度 (在 xyz 轴的缩放长度)
+	const glm::vec4* rotations,		// [P 4] 每个高斯体的旋转变量
+	const float scale_modifier,		// 控制高斯体们的尺寸, 缩放因子
+	const float* cov3Ds,			// 3D 协方差矩阵
+	const float* viewmatrix,		// 视图矩阵
+	const float* projmatrix,		// 投影矩阵
+	const float focal_x,			// x 轴焦距
+	const float focal_y,			// y 轴焦距
+	const float tan_fovx,			// 单位深度处的半宽度
+	const float tan_fovy,			// 单位深度处的半高度
+	const glm::vec3* campos,		// 相机在世界里的坐标
+	const float3* dL_dmean2D,		// loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
+	const float* dL_dconic,			// loss 对高斯点 2D 协方差逆矩阵的梯度 [P 2 2]
+	const float* dL_dinvdepth,		// loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+	float* dL_dopacity,				// loss 对高斯点不透明度的梯度 [P 1]
+	glm::vec3* dL_dmean3D,					// 输出: loss 对高斯点 3D 坐标的梯度 [P 3]
+	float* dL_dcolor,				// loss 对高斯点 RGB 颜色的梯度 [P 3]
+	float* dL_dcov3D,						// 输出: loss 对高斯体 3D 协方差的梯度 [P 6]
+	float* dL_dsh,							// 输出: loss 对 sh 系数的梯度 [P M D]
+	glm::vec3* dL_dscale,					// 输出: loss 对每个高斯体的尺度 (在 xyz 轴的缩放长度) 的梯度 [P 3]
+	glm::vec4* dL_drot,						// 输出: loss 对每个高斯体的旋转变量的梯度 [P 4]
+	bool antialiasing	// 是否开启抗锯齿
+) {
 	// Propagate gradients for the path of 2D conic matrix computation. 
 	// Somewhat long, thus it is its own kernel rather than being part of 
 	// "preprocess". When done, loss gradient w.r.t. 3D means has been
 	// modified and gradient w.r.t. 3D covariance matrix has been computed.	
+	// P 个高斯体并行算
+	// 利用 dL_dconic, dL_dopacity, dL_dinvdepth, 梯度反传到 dL_dmean3D, dL_dconv3D
+	// 为什么要用 dL_dinvdepth 呢? 因为深度 view.z 是经过视图矩阵变换得到的
 	computeCov2DCUDA << <(P + 255) / 256, 256 >> > (
-		P,
-		means3D,
-		radii,
-		cov3Ds,
-		focal_x,
-		focal_y,
-		tan_fovx,
-		tan_fovy,
-		viewmatrix,
-		opacities,
-		dL_dconic,
-		dL_dopacity,
-		dL_dinvdepth,
-		(float3*)dL_dmean3D,
-		dL_dcov3D,
-		antialiasing);
+		P,						// 高斯体数量
+		means3D,				// [P 3] 高斯体的 3D 坐标
+		radii,					// [P] 每个高斯点的投影半径
+		cov3Ds,					// 3D 协方差矩阵
+		focal_x,				// x 轴焦距
+		focal_y,				// y 轴焦距
+		tan_fovx,				// 单位深度处的半宽度
+		tan_fovy,				// 单位深度处的半高度
+		viewmatrix,				// 视图矩阵
+		opacities,				// 高斯体的不透明度
+		dL_dconic,				// loss 对高斯点 2D 协方差逆矩阵的梯度 [P 2 2]
+		dL_dopacity,			// loss 对高斯点不透明度的梯度 [P 1]
+		dL_dinvdepth,			// loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+		(float3*)dL_dmean3D,			// 输出: loss 对高斯点 3D 坐标的梯度 [P 3]
+		dL_dcov3D,						// 输出: loss 对高斯体 3D 协方差的梯度 [P 6]
+		antialiasing
+	);
 
 	// Propagate gradients for remaining steps: finish 3D mean gradients,
 	// propagate color gradients to SH (if desireD), propagate 3D covariance
 	// matrix gradients to scale and rotation.
+	// P 个高斯体并行算
+	// 利用 dL_dmean2D, dL_dcolor, dL_dconv3D, 梯度反传到 dL_dmean3D, dL_dsh, dL_dscale, dL_drot
 	preprocessCUDA<NUM_CHANNELS> << < (P + 255) / 256, 256 >> > (
-		P, D, M,
-		(float3*)means3D,
-		radii,
-		shs,
-		clamped,
-		(glm::vec3*)scales,
-		(glm::vec4*)rotations,
-		scale_modifier,
-		projmatrix,
-		campos,
-		(float3*)dL_dmean2D,
-		(glm::vec3*)dL_dmean3D,
-		dL_dcolor,
-		dL_dcov3D,
-		dL_dsh,
-		dL_dscale,
-		dL_drot,
-		dL_dopacity);
+		P,						// 高斯体数量
+		D,						// SH 阶数
+		M,						// SH 系数数量
+		(float3*)means3D,		// [P 3] 高斯体的 3D 坐标
+		radii,					// [P] 每个高斯点的投影半径
+		shs,					// [P M D] sh 系数
+		clamped,				// [P 3] 每个高斯点的 R/G/B 通道的值是否被 clamped 的标志位
+		(glm::vec3*)scales,		// [P 3] 每个高斯体的尺度 (在 xyz 轴的缩放长度)
+		(glm::vec4*)rotations,	// [P 4] 每个高斯体的旋转变量
+		scale_modifier,			// 控制高斯体们的尺寸, 缩放因子
+		projmatrix,				// 投影矩阵
+		campos,					// 相机在世界里的坐标
+		(float3*)dL_dmean2D,	// loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
+		(glm::vec3*)dL_dmean3D,			// 输出: loss 对高斯点 3D 坐标的梯度 [P 3]
+		dL_dcolor,				// loss 对高斯点 RGB 颜色的梯度 [P 3]
+		dL_dcov3D,				// loss 对高斯体 3D 协方差的梯度 [P 6]
+		dL_dsh,							// 输出: loss 对 sh 系数的梯度 [P M D]
+		dL_dscale,						// 输出: loss 对每个高斯体的尺度 (在 xyz 轴的缩放长度) 的梯度 [P 3]
+		dL_drot,						// 输出: loss 对每个高斯体的旋转变量的梯度 [P 4]
+		dL_dopacity				// loss 对高斯点不透明度的梯度 [P 1]
+	);
 }
 
 void BACKWARD::render(
-	const dim3 grid, const dim3 block,
-	const uint2* ranges,
-	const uint32_t* point_list,
-	int W, int H,
-	const float* bg_color,
-	const float2* means2D,
-	const float4* conic_opacity,
-	const float* colors,
-	const float* depths,
-	const float* final_Ts,
-	const uint32_t* n_contrib,
-	const float* dL_dpixels,
-	const float* dL_invdepths,
-	float3* dL_dmean2D,
-	float4* dL_dconic2D,
-	float* dL_dopacity,
-	float* dL_dcolors,
-	float* dL_dinvdepths)
-{
+	const dim3 grid,				// (gridX,gridY,1)——屏幕被划分成多少个 tile
+	const dim3 block,				// (16,16,1)——每个 tile 里有多少个 thread
+	const uint2* ranges,			// [tileID 2] tile 负责的 pairs 范围, 值是 point_list_keys 中的索引 (左闭右开)
+	const uint32_t* point_list,		// 对应着 point_list_keys 中高斯体的索引 idx
+	int W,							// 图像宽度
+	int H,							// 图像高度
+	const float* bg_color,			// 背景颜色
+	const float2* means2D,			// [P 2] 高斯投影圆心的 2D 坐标
+	const float4* conic_opacity,	// 高斯投影椭圆的 2D 协方差矩阵的逆矩阵 + 3D 高斯体的不透明度
+	const float* colors,			// [P 3] 高斯投影圆心的 RGB 颜色
+	const float* depths,			// [P] 高斯投影深度
+	const float* final_Ts,			// [P] 每个 pixel 的剩余透射率
+	const uint32_t* n_contrib,		// [P] 该像素光线上穿过的高斯体数量
+	const float* dL_dpixels,		// loss 对渲染 RGB 图像的梯度 [3 H W]
+	const float* dL_invdepths,		// loss 对反深度图的梯度 [1 H W]
+	float3* dL_dmean2D,						// 输出: loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
+	float4* dL_dconic2D,					// 输出: loss 对高斯点 2D 协方差逆矩阵的梯度 [P 2 2]
+	float* dL_dopacity,						// 输出: loss 对高斯点不透明度的梯度 [P 1]
+	float* dL_dcolors,						// 输出: loss 对高斯点 RGB 颜色的梯度 [P 3]
+	float* dL_dinvdepths					// 输出: loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+) {
+	// 每个像素并行去做
 	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
 		ranges,
 		point_list,
-		W, H,
+		W,
+		H,
 		bg_color,
 		means2D,
 		conic_opacity,
@@ -749,5 +790,5 @@ void BACKWARD::render(
 		dL_dopacity,
 		dL_dcolors,
 		dL_dinvdepths
-		);
+	);
 }

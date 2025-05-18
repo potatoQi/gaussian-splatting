@@ -233,7 +233,7 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         grads = (
             grad_means3D,           # 对所有高斯体的 3D 坐标 [N 3] 的梯度
-            grad_means2D,           # NOTE: ?
+            grad_means2D,           # ndc 空间的高斯点 2D 坐标的梯度 [P 2]
             grad_sh,                # 对 sh 系数的梯度
             grad_colors_precomp,    # 对预先计算好的 RGB 颜色 (若有) 的梯度
             grad_opacities,         # 对所有高斯体的不透明度的梯度
