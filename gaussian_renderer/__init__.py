@@ -84,6 +84,7 @@ def render(
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
     means3D = pc.get_xyz            # 取出所有高斯体的 3D 坐标 [N 3]
+    reps = pc.get_reps              # 取出所有高斯体的自定义特征 [N DIM]
     means2D = screenspace_points    # 把之前创建的, 可微的占位张量赋给 means2D
     opacity = pc.get_opacity        # 取出所有高斯体的不透明度
 
@@ -162,7 +163,8 @@ def render(
             opacities = opacity,                        # 所有高斯体的不透明度
             scales = scales,                            # 每个高斯体的尺度 (在 xyz 轴的缩放长度)
             rotations = rotations,                      # 每个高斯体的旋转变量
-            cov3D_precomp = cov3D_precomp               # 预先计算好的协方差矩阵 (若有)
+            cov3D_precomp = cov3D_precomp,              # 预先计算好的协方差矩阵 (若有)
+            reps = reps,                                # 所有高斯体的自定义特征 [N DIM]
         )
         # rasterizer 里的 input 参数在运行完上面这句话后都会拿到 loss 对自己的梯度
         
@@ -181,7 +183,7 @@ def render(
         "viewspace_points": screenspace_points,         # screenspace_points 这个张量里面此时已经写入了每个高斯的屏幕坐标 (内含梯度信息)
         "visibility_filter" : (radii > 0).nonzero(),    # 从所有高斯体中筛出“在屏幕上真实可见”的那些，返回它们的索引
         "radii": radii,                                 # 每个高斯点投影到图像上时的像素半径
-        "depth" : depth_image,                           # 渲染的反深度图
+        "depth" : depth_image,                          # 渲染的反深度图
         "gauss_sum": gauss_sum,
         "gauss_count": gauss_count,
     }

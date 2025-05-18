@@ -63,7 +63,11 @@ def training(
 
 
     # 实例化一个可学习的三维高斯点云模型实例
-    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
+    gaussians = GaussianModel(
+        sh_degree=dataset.sh_degree,
+        optimizer_type=opt.optimizer_type,
+        dim=opt.dim
+    )
     # 从 COLMAP 处理完的数据里加载数据并封装好, 并初始化 gaussians 里参数的数据
     scene = Scene(dataset, gaussians)
     # 把 opt 优化器参数在 gaussians 中设置好
@@ -197,11 +201,12 @@ def training(
         # 每个高斯点投影到图像上时的像素半径
         radii = render_pkg["radii"]  # tensor, [N]
 
-        if iteration % 100 == 0:
-            print('===========================================================')
-            for idx in range(min(10, len(render_pkg['gauss_sum']))):
-                if render_pkg['gauss_count'][idx] > 0:
-                    print(f"Gaussian {idx} , Transmittance: {render_pkg['gauss_sum'][idx] / render_pkg['gauss_count'][idx]}")
+        # TEST: 每隔 100 步打印一下每个高斯基元的平均透过率
+        # if iteration % 100 == 0:
+        #     print('===========================================================')
+        #     for idx in range(min(10, len(render_pkg['gauss_sum']))):
+        #         if render_pkg['gauss_count'][idx] > 0:
+        #             print(f"Gaussian {idx} , Transmittance: {render_pkg['gauss_sum'][idx] / render_pkg['gauss_count'][idx]}")
 
         # 如果有透明度掩码, 就把渲染出来的图像乘以透明度掩码
         if viewpoint_cam.alpha_mask is not None:
@@ -325,7 +330,24 @@ def training(
                     gaussians.optimizer.zero_grad(set_to_none = True)
                 else:
                     # 优化高斯模型的参数
+                    last_reps = gaussians.get_reps.clone().detach()  # tensor, [N, DIM], 代表高斯点的自定义特征
                     gaussians.optimizer.step()
+
+                    # TEST: 任务 3 测试代码; 测试 reps 的更新是否正常 (不同的 op 需要在 __init__.py 里更改 backward 的值)
+                    reps = gaussians.get_reps      # tensor, [N, DIM], 代表高斯点的自定义特征
+                    # print("reps.requires_grad =", reps.requires_grad)
+                    # print("reps.grad         =", reps.grad)
+                    op = 1
+                    if op == 0: # 检查在 backward 传 None 梯度时, reps 变化是否正常
+                        if (last_reps.shape == reps.shape):
+                            if torch.allclose(last_reps, reps, atol=1e-4) is False:
+                                raise ValueError("reps 不应该变化的, 但是却变化了")
+                        else:
+                            raise ValueError("按理说不应该执行到这里的, 如果出现了说明程序有 bug")
+                    elif op == 1: # 检查在 backward 传定值正数时, reps 变化是否正常 (会把 reps 的变化趋势画在 tensorboard 里)
+                        avg_reps = reps.mean().item()
+                        tb_writer.add_scalar('reps/avg_value', avg_reps, iteration)
+
                     gaussians.optimizer.zero_grad(set_to_none = True)
 
             # 保存下 ckpt

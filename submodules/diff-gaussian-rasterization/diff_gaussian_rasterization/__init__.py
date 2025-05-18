@@ -28,6 +28,7 @@ def rasterize_gaussians(
     rotations,
     cov3Ds_precomp,
     raster_settings,
+    reps,
 ):
     # 调用 torch.autograd.Function 的子类 _RasterizeGaussians 的 apply 方法来执行渲染操作
     # apply 会依次执行: _RasterizeGaussians.forward 和 _RasterizeGaussians.backward
@@ -41,8 +42,8 @@ def rasterize_gaussians(
         rotations,
         cov3Ds_precomp,
         raster_settings,
+        reps,
     )
-
 '''
 知识点补充:
 可以发现, 这个类继承于 torch.autograd.Function, 只要是继承这个类的, 其实就是 python 层面自己写的一个自定义算子
@@ -68,6 +69,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         rotations,          # 每个高斯体的旋转变量
         cov3Ds_precomp,     # 预先计算好的协方差矩阵 (若有)
         raster_settings,    # 渲染需要的配置参数, 具体内容看 class GaussianRasterizationSettings
+        reps,               # 所有高斯体的自定义特征 [N DIM]
     ):
 
         # Restructure arguments the way that the C++ lib expects them
@@ -92,7 +94,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.campos,             # 相机在世界里的坐标
             raster_settings.prefiltered,        # 表示你是否已经在别的地方对颜色做过“预滤波”（模糊、降采样）处理。这里设为 False，让 rasterizer 自己来处理
             raster_settings.antialiasing,       # 是否开启抗锯齿
-            raster_settings.debug               # 如果 True，光栅化器会多打印点位数据、可视化中间结果，方便调试
+            raster_settings.debug,              # 如果 True，光栅化器会多打印点位数据、可视化中间结果，方便调试
+            reps,                               # 所有高斯体的自定义特征 [N DIM]
         )
 
         # Invoke C++/CUDA rasterizer
@@ -122,7 +125,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         # last_contr_gauss: [1 H W], 每个 pixel 上最后一个高斯体的索引
         # depths: [P], 每个高斯体的深度值
 
-        # 功能 1 测试代码 (若要开启测试请先把 forward.cu 中的 TEST 测试代码打开)
+        # TEST: 任务 1 测试代码 (若要开启测试请先把 forward.cu 中的 TEST 测试代码打开)
         # idx_goal = torch.argmax(depths).item()
         # n = len(radii)
         # last_contr_gauss = last_contr_gauss.view(-1).cpu().tolist()
@@ -156,7 +159,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             opacities,              # 所有高斯体的不透明度
             geomBuffer,
             binningBuffer,
-            imgBuffer
+            imgBuffer,
+            reps,                   # 所有高斯体的自定义特征 [N DIM]
         )
         
         return color, radii, invdepths, gauss_sum, gauss_count
@@ -186,7 +190,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             opacities,             # 所有高斯体的不透明度
             geomBuffer,
             binningBuffer,
-            imgBuffer
+            imgBuffer,
+            reps,                  # 所有高斯体的自定义特征 [N DIM]
         ) = ctx.saved_tensors
 
         # Restructure args as C++ method expects them
@@ -231,6 +236,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_rotations
         ) = _C.rasterize_gaussians_backward(*args)        
 
+        grad_reps = reps.new_full(reps.shape, 0.001);
+
         grads = (
             grad_means3D,           # 对所有高斯体的 3D 坐标 [N 3] 的梯度
             grad_means2D,           # ndc 空间的高斯点 2D 坐标的梯度 [P 2]
@@ -241,6 +248,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_rotations,         # 对每个高斯体的旋转变量的梯度
             grad_cov3Ds_precomp,    # 对预先计算好的协方差矩阵 (若有) 的梯度
             None,                   # 对 raster_settings 的梯度, 这里不需要, 所以用 None 占位
+            # TEST: 任务 3 测试的时候需要更改下面 reps 的梯度: None / grad_reps
+            grad_reps,                   # 对 reps 的梯度, 这里暂时用 None 占位
         )
 
         return grads
@@ -285,7 +294,8 @@ class GaussianRasterizer(nn.Module):
         colors_precomp = None,      # 预先计算好的 RGB 颜色 (若有)
         scales = None,              # 每个高斯体的尺度 (在 xyz 轴的缩放长度)
         rotations = None,           # 每个高斯体的旋转变量
-        cov3D_precomp = None        # 预先计算好的协方差矩阵 (若有)
+        cov3D_precomp = None,       # 预先计算好的协方差矩阵 (若有)
+        reps = None,                # 所有高斯体的自定义特征 [N DIM]
     ):
         raster_settings = self.raster_settings
 
@@ -320,5 +330,6 @@ class GaussianRasterizer(nn.Module):
             rotations,          # 每个高斯体的旋转变量
             cov3D_precomp,      # 预先计算好的协方差矩阵 (若有)
             raster_settings,    # 渲染需要的配置参数, 具体内容看上面的 class GaussianRasterizationSettings
+            reps,               # 所有高斯体的自定义特征 [N DIM]
         )
 

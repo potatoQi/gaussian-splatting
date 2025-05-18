@@ -68,13 +68,19 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& campos,			// 相机在世界里的坐标
 	const bool prefiltered,					// 表示你是否已经在别的地方对颜色做过“预滤波”（模糊、降采样）处理。这里设为 False，让 rasterizer 自己来处理
 	const bool antialiasing,				// 是否开启抗锯齿
-	const bool debug						// 是否开启调试模式
+	const bool debug,						// 是否开启调试模式
+	const torch::Tensor& reps				// 自定义 reps [P 3]
 ) {
 	// 传入的 means3D 的 shape 必须满足 [P 3]
 	if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
 		AT_ERROR("means3D must have dimensions (num_points, 3)");
 	}
 	
+	// 传入的自定义 reps 的 shape 必须满足 [P NUM_DIM]
+	if (reps.ndimension() != 2 || reps.size(1) != NUM_DIM) {
+		AT_ERROR("reps must have dimensions (num_points, NUM_DIM)");
+	}
+
 	const int P = means3D.size(0);	// 点的数量
 	const int H = image_height;
 	const int W = image_width;
@@ -172,7 +178,8 @@ RasterizeGaussiansCUDA(
 			gauss_sum_ptr,
 			gauss_count_ptr,
 			last_contr_gauss_ptr,
-			out_depths_ptr
+			out_depths_ptr,
+			reps.contiguous().data<float>()					// 自定义高斯体特征 [P DIM]
 		);
 	}
 

@@ -181,7 +181,7 @@ __global__ void preprocessCUDA(
 	uint32_t* tiles_touched,				// [P] 输出的每个投影点影响到的 tile 数量
 	bool prefiltered,				// 是否开启预滤波
 	bool antialiasing,				// 是否开启抗锯齿
-	float* out_depths
+	float* out_depths						// [P] 每个高斯体的深度 (要往里填东西)
 ) {
 	// 分配一个 thread 编号
 	auto idx = cg::this_grid().thread_rank();
@@ -310,7 +310,7 @@ __global__ void preprocessCUDA(
 // Main rasterization method. Collaboratively works on one tile per
 // block, each thread treats one pixel. Alternates between fetching 
 // and rasterizing data.
-template <uint32_t CHANNELS>
+template <uint32_t CHANNELS, uint32_t DIM>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,				// [tileID, 2] tile 的涉及范围, 值是 point_list_keys 中的索引
@@ -326,10 +326,11 @@ renderCUDA(
 	float* __restrict__ out_color,							// 渲染图像 (要往里填东西)
 	const float* __restrict__ depths,				// [P] 高斯投影深度
 	float* __restrict__ invdepth,							// 反深度图 (要往里填东西)
-	float* __restrict__ gauss_sum,
-	int* __restrict__ gauss_count,
-	int* __restrict__ last_contr_gauss,
-	float* __restrict__ out_accum_alpha
+	float* __restrict__ gauss_sum,			// [P] 每个高斯体上累计的剩余透射率
+	int* __restrict__ gauss_count,			// [P] 每个高斯体上穿过射线数量
+	int* __restrict__ last_contr_gauss,		// [P] 每个 pixel 最后一个对该 pixel 产生贡献的高斯体的 idx
+	float* __restrict__ out_accum_alpha,	// [P] 每个 pixel 的剩余透射率
+	float* __restrict__ reps				// [P M] 高斯点的自定义特征
 ) {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -498,10 +499,11 @@ void FORWARD::render(
 	float* gauss_sum,
 	int* gauss_count,
 	int* last_contr_gauss,
-	float* out_accum_alpha
+	float* out_accum_alpha,
+	float* reps
 ) {
 	// 并行处理每个像素
-	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
+	renderCUDA<NUM_CHANNELS, NUM_DIM> << <grid, block >> > (
 		ranges,
 		point_list,
 		W,
@@ -518,7 +520,8 @@ void FORWARD::render(
 		gauss_sum,
 		gauss_count,
 		last_contr_gauss,
-		out_accum_alpha
+		out_accum_alpha,
+		reps
 	);
 }
 
