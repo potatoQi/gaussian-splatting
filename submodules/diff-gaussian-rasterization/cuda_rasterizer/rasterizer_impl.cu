@@ -223,12 +223,13 @@ int CudaRasterizer::Rasterizer::forward(
 	bool antialiasing,						// 是否开启抗锯齿
 	int* radii,					// 每个高斯点投影半径 (要往里填东西)
 	bool debug,								// 是否开启 debug 模式
-	float* out_accum_alpha,			// [P] 每个 pixel 的剩余透射率
+	float* out_accum_alpha,			// [1 H W] 每个 pixel 的剩余透射率
 	float* gauss_sum,				// [P] 每个高斯体上累计的剩余透射率
 	int* gauss_count,				// [P] 每个高斯体上穿过射线数量
-	int* last_contr_gauss,			// [P] 每个 pixel 最后一个对该 pixel 产生贡献的高斯体的 idx
+	int* last_contr_gauss,			// [1 H W] 每个 pixel 最后一个对该 pixel 产生贡献的高斯体的 idx
 	float* out_depths,				// [P] 每个高斯体的深度
-	float* reps						// [P M] 高斯点的自定义特征
+	float* reps,					// [P M] 高斯点的自定义特征
+	float* out_reps					// [NUM_DIM H W] 每个 pixel 的自定义特征
 ) {
 	// 想象一个针孔相机, 光线从物体经过针孔, 打到后面的成像平面, 焦距就是针孔到成像平面之间的距离
 	// f 越大, 成像平面离针孔远，投影的物体看上去“更大”、视野更窄（长焦）。
@@ -419,9 +420,10 @@ int CudaRasterizer::Rasterizer::forward(
 			depth,								// 反深度图 (要往里填东西)
 			gauss_sum,							// [P] 每个高斯体上累计的剩余透射率 (要往里填东西)
 			gauss_count,						// [P] 每个高斯体上穿过射线数量 (要往里填东西)
-			last_contr_gauss,					// [P] 每个 pixel 最后一个对该 pixel 产生贡献的高斯体的 idx (要往里填东西)
-			out_accum_alpha,					// [P] 每个 pixel 的剩余透射率 (要往里填东西)
-			reps								// [P M] 高斯点的自定义特征 (要往里填东西)
+			last_contr_gauss,					// [1 H W] 每个 pixel 最后一个对该 pixel 产生贡献的高斯体的 idx (要往里填东西)
+			out_accum_alpha,					// [1 H W] 每个 pixel 的剩余透射率 (要往里填东西)
+			reps,								// [P M] 高斯点的自定义特征 (要往里填东西)
+			out_reps							// [NUM_DIM H W] 每个 pixel 的高斯点的自定义特征 (要往里填东西)
 		),
 		debug
 	)
@@ -466,6 +468,7 @@ void CudaRasterizer::Rasterizer::backward(
 	// 从 Python 端传回的 loss 对 forward 输出的梯度
 	const float* dL_dpix,			// loss 对渲染 RGB 图像的梯度 [3 H W]
 	const float* dL_invdepths,		// loss 对反深度图的梯度 [1 H W]
+	const float* dL_reps,			// loss 对自定义特征的梯度 [NUM_DIM H W]
 
 	// 需要往里写入值的梯度
 	float* dL_dmean2D,			// loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
@@ -481,7 +484,10 @@ void CudaRasterizer::Rasterizer::backward(
 
 	// 额外开关
 	bool antialiasing,	// 是否开启抗锯齿
-	bool debug			// 是否开启 debug 模式
+	bool debug,			// 是否开启 debug 模式
+
+	const float* reps,			// [P M] 高斯点的自定义特征
+	float* dL_dreps				// loss 对自定义特征的梯度 [P NUM_DIM]
 ) {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);			// 管理高斯点信息的地方
 	BinningState binningState = BinningState::fromChunk(binning_buffer, R);		// 放 (tildeID, depth), 对应高斯idx 的地方
@@ -497,7 +503,7 @@ void CudaRasterizer::Rasterizer::backward(
 	const dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);		// 一共需要的 block 数量 (tile 数量)
 	const dim3 block(BLOCK_X, BLOCK_Y, 1);	// 一个 block 有 16x16 个 thread
 
-	// 下面这个函数就是把 dL_dpix, dL_invdepths 反传到几个输出身上, 过程需要用到一些前向过程已经计算出来的量
+	// 下面这个函数就是把 dL_dpix, dL_invdepths, dL_reps 反传到几个输出身上, 过程需要用到一些前向过程已经计算出来的量
 	// Compute loss gradients w.r.t. 2D mean position, conic matrix,
 	// opacity and RGB of Gaussians from per-pixel loss gradients.
 	// If we were given precomputed colors and not SHs, use them.
@@ -518,11 +524,14 @@ void CudaRasterizer::Rasterizer::backward(
 			imgState.n_contrib,			// 实际影响到该 pixel 的高斯体实例数量, 换句话说, 该像素光线上穿过的高斯体数量
 			dL_dpix,					// loss 对渲染 RGB 图像的梯度 [3 H W]
 			dL_invdepths,				// loss 对反深度图的梯度 [1 H W]
+			dL_reps,					// loss 对自定义特征的梯度 [NUM_DIM H W]
 			(float3*)dL_dmean2D,				// 输出: loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
 			(float4*)dL_dconic,					// 输出: loss 对高斯点 2D 协方差逆矩阵的梯度 [P 2 2]
 			dL_dopacity,						// 输出: loss 对高斯点不透明度的梯度 [P 1]
 			dL_dcolor,							// 输出: loss 对高斯点 RGB 颜色的梯度 [P 3]
-			dL_dinvdepth						// 输出: loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+			dL_dinvdepth,						// 输出: loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+			dL_dreps,							// 输出: loss 对自定义特征的梯度 [P NUM_DIM]
+			reps						// [P M] 高斯点的自定义特征
 		),
 		debug
 	);

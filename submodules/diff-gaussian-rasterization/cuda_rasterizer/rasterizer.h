@@ -58,7 +58,8 @@ namespace CudaRasterizer
 			int* gauss_count = nullptr,
 			int* last_contr_gauss = nullptr,
 			float* out_depth = nullptr,
-			float* reps = nullptr
+			float* reps = nullptr,
+			float* out_reps = nullptr
 		);
 
 		static void backward(
@@ -83,6 +84,7 @@ namespace CudaRasterizer
 			char* image_buffer,
 			const float* dL_dpix,
 			const float* dL_invdepths,
+			const float* dL_reps,
 			float* dL_dmean2D,
 			float* dL_dconic,
 			float* dL_dopacity,
@@ -94,7 +96,10 @@ namespace CudaRasterizer
 			float* dL_dscale,
 			float* dL_drot,
 			bool antialiasing,
-			bool debug);
+			bool debug,
+			const float* reps,
+			float* dL_dreps
+		);
 	};
 };
 

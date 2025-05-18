@@ -155,6 +155,7 @@ def render(
             depth_image,
             gauss_sum,
             gauss_count,
+            out_reps,
         ) = rasterizer(
             means3D = means3D,                          # 所有高斯体的 3D 坐标 [N 3]
             means2D = means2D,                          # 感觉就一容器变量, 负责在 backward 里接收 grad_means2D, 在 forward 过程中没用到
@@ -186,5 +187,6 @@ def render(
         "depth" : depth_image,                          # 渲染的反深度图
         "gauss_sum": gauss_sum,
         "gauss_count": gauss_count,
+        "out_reps": out_reps,
     }
     return out

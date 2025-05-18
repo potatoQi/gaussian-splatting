@@ -70,7 +70,8 @@ namespace FORWARD
 		int* gauss_count,
 		int* last_contr_gauss,
 		float* out_accum_alpha,
-		float* reps
+		float* reps,
+		float* out_reps
 	);
 }
 

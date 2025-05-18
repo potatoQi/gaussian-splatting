@@ -113,6 +113,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             gauss_count,
             last_contr_gauss,
             depths,
+            out_reps,
         ) = _C.rasterize_gaussians(*args)
         # num_rendered: 渲染动作的总次数
         # color: [3 H W], 渲染图
@@ -124,6 +125,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         # gauss_count: [P], 每个高斯体有多少射线投射到它上面
         # last_contr_gauss: [1 H W], 每个 pixel 上最后一个高斯体的索引
         # depths: [P], 每个高斯体的深度值
+        # out_reps: [DIM H W], 每个 pixel 上的高斯体的自定义特征
 
         # TEST: 任务 1 测试代码 (若要开启测试请先把 forward.cu 中的 TEST 测试代码打开)
         # idx_goal = torch.argmax(depths).item()
@@ -163,7 +165,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             reps,                   # 所有高斯体的自定义特征 [N DIM]
         )
         
-        return color, radii, invdepths, gauss_sum, gauss_count
+        return color, radii, invdepths, gauss_sum, gauss_count, out_reps
 
     # 现在就是有 loss 对 forward 里 return 的那几个 tensor 的梯度, 这几个梯度就是 backward 的 input
     # 然后你要利用这些 input 求出 loss 对 .apply(...) 里所有参数的梯度
@@ -175,6 +177,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         grad_out_depth,              # 对反深度图 invdepths 的梯度
         _2,
         _3,
+        grad_out_reps,             # 对自定义特征图的梯度
     ):
         # 恢复对应 forward 里通过 ctx.save_for_backward 保存的变量
         num_rendered = ctx.num_rendered
@@ -212,6 +215,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.tanfovy,            # 单位深度处的半高度
             grad_out_color,                     # 对渲染图 color 的梯度
             grad_out_depth,                     # 对反深度图 invdepths 的梯度
+            grad_out_reps,                      # 对自定义特征图的梯度
             sh,                                 # sh 系数 [P M D(3)]
             raster_settings.sh_degree,          # 球谐函数阶数
             raster_settings.campos,             # 相机在世界里的坐标
@@ -220,7 +224,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             binningBuffer,
             imgBuffer,
             raster_settings.antialiasing,       # 是否开启抗锯齿
-            raster_settings.debug               # 如果 True，光栅化器会多打印点位数据、可视化中间结果，方便调试
+            raster_settings.debug,              # 如果 True，光栅化器会多打印点位数据、可视化中间结果，方便调试
+            reps,                               # 所有高斯体的自定义特征 [N DIM]
         )
 
         # Compute gradients for relevant tensors by invoking backward method
@@ -233,10 +238,11 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_cov3Ds_precomp,
             grad_sh,
             grad_scales,
-            grad_rotations
+            grad_rotations,
+            grad_reps,
         ) = _C.rasterize_gaussians_backward(*args)        
 
-        grad_reps = reps.new_full(reps.shape, 0.001);
+        grad_reps_test = reps.new_full(reps.shape, 0.001);
 
         grads = (
             grad_means3D,           # 对所有高斯体的 3D 坐标 [N 3] 的梯度
@@ -248,8 +254,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_rotations,         # 对每个高斯体的旋转变量的梯度
             grad_cov3Ds_precomp,    # 对预先计算好的协方差矩阵 (若有) 的梯度
             None,                   # 对 raster_settings 的梯度, 这里不需要, 所以用 None 占位
-            # TEST: 任务 3 测试的时候需要更改下面 reps 的梯度: None / grad_reps
-            grad_reps,                   # 对 reps 的梯度, 这里暂时用 None 占位
+            # TEST: 任务 3 测试的时候需要更改下面 reps 的梯度: None / grad_reps_test / grad_reps
+            grad_reps,              # 对所有高斯体的自定义特征 [N DIM] 的梯度
         )
 
         return grads

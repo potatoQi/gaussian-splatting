@@ -110,6 +110,8 @@ def training(
     ema_loss_for_log = 0.0
     # 用于平滑记录深度正则项的损失
     ema_Ll1depth_for_log = 0.0
+    # 用于平滑记录自定义特征图损失
+    ema_Ll1rep_for_log = 0.0
 
     # 创建一个进度条对象
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
@@ -200,6 +202,8 @@ def training(
         visibility_filter = render_pkg["visibility_filter"]  # tensor, [n], int
         # 每个高斯点投影到图像上时的像素半径
         radii = render_pkg["radii"]  # tensor, [N]
+        # 渲染出来的特征图
+        rep = render_pkg["out_reps"]  # tensor, [DIM, H, W]
 
         # TEST: 每隔 100 步打印一下每个高斯基元的平均透过率
         # if iteration % 100 == 0:
@@ -240,6 +244,12 @@ def training(
         else:
             Ll1depth = 0
 
+        # 自定义特征图损失
+        gt_rep = torch.full_like(rep, 10.0, device="cuda")  # tensor, [DIM, H, W]
+        Ll1rep = l1_loss(rep, gt_rep)
+        # 如果不想要自定义特征图损失影响总 loss, 就把权重置为 0
+        loss = loss + opt.lambda_rep * Ll1rep
+
         loss.backward()
 
         # 打个点
@@ -251,9 +261,12 @@ def training(
             # 更新下 ema 的 loss 们
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
+            ema_Ll1rep_for_log = 0.4 * Ll1rep.item() + 0.6 * ema_Ll1rep_for_log
 
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})  # 每 10  步刷新一次进度条尾注
+                progress_bar.set_postfix(
+                    {"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "Rep Loss": f"{ema_Ll1rep_for_log:.{7}f}"},
+                )  # 每 10  步刷新一次进度条尾注
                 progress_bar.update(10)  # 推进进度条 10 步
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -337,7 +350,8 @@ def training(
                     reps = gaussians.get_reps      # tensor, [N, DIM], 代表高斯点的自定义特征
                     # print("reps.requires_grad =", reps.requires_grad)
                     # print("reps.grad         =", reps.grad)
-                    op = 1
+                    # raise
+                    op = 2
                     if op == 0: # 检查在 backward 传 None 梯度时, reps 变化是否正常
                         if (last_reps.shape == reps.shape):
                             if torch.allclose(last_reps, reps, atol=1e-4) is False:
@@ -345,6 +359,9 @@ def training(
                         else:
                             raise ValueError("按理说不应该执行到这里的, 如果出现了说明程序有 bug")
                     elif op == 1: # 检查在 backward 传定值正数时, reps 变化是否正常 (会把 reps 的变化趋势画在 tensorboard 里)
+                        avg_reps = reps.mean().item()
+                        tb_writer.add_scalar('reps/avg_value', avg_reps, iteration)
+                    elif op == 2: # 检查在 backward 传真正梯度时, reps 是否会趋向 10 (会把 reps 的变化趋势画在 tensorboard 里)
                         avg_reps = reps.mean().item()
                         tb_writer.add_scalar('reps/avg_value', avg_reps, iteration)
 

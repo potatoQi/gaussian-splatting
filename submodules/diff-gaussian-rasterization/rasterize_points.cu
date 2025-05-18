@@ -44,7 +44,8 @@ std::tuple<
 	torch::Tensor,	// gauss_sum
 	torch::Tensor,	// gauss_count
 	torch::Tensor,	// last_contr_gauss
-	torch::Tensor	// out_depths
+	torch::Tensor,	// out_depths
+	torch::Tensor	// out_reps
 >
 RasterizeGaussiansCUDA(
 	// 这里传的是地址, 省空间; 同时用了 const, 所以同时避免了不小心的修改操作
@@ -69,7 +70,7 @@ RasterizeGaussiansCUDA(
 	const bool prefiltered,					// 表示你是否已经在别的地方对颜色做过“预滤波”（模糊、降采样）处理。这里设为 False，让 rasterizer 自己来处理
 	const bool antialiasing,				// 是否开启抗锯齿
 	const bool debug,						// 是否开启调试模式
-	const torch::Tensor& reps				// 自定义 reps [P 3]
+	const torch::Tensor& reps				// 自定义高斯体特征 [P 3]
 ) {
 	// 传入的 means3D 的 shape 必须满足 [P 3]
 	if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
@@ -136,6 +137,9 @@ RasterizeGaussiansCUDA(
 	torch::Tensor out_depths = torch::empty({P}, float_opts.device(torch::kCUDA));
 	float* out_depths_ptr = out_depths.data_ptr<float>();
 
+	torch::Tensor out_reps = torch::empty({NUM_DIM, H, W}, float_opts.device(torch::kCUDA));
+	float* out_reps_ptr = out_reps.data_ptr<float>();
+
 	if(P != 0) {
 		// M 是每个高斯点球谐系数的数量
 		int M = 0;
@@ -174,12 +178,13 @@ RasterizeGaussiansCUDA(
 			antialiasing,									// 是否开启抗锯齿
 			radii.contiguous().data<int>(),			// 每个高斯点投影半径 (要往里填东西)
 			debug,											// 是否开启调试模式
-			accum_alpha_ptr,							// 每个 pixel 的剩余透射率 (要往里填东西)
-			gauss_sum_ptr,
-			gauss_count_ptr,
-			last_contr_gauss_ptr,
-			out_depths_ptr,
-			reps.contiguous().data<float>()					// 自定义高斯体特征 [P DIM]
+			accum_alpha_ptr,						// [1 H W] 每个 pixel 的剩余透射率 (要往里填东西)
+			gauss_sum_ptr,							// [P] 每个高斯体上累计的剩余透射率 (要往里填东西)
+			gauss_count_ptr,						// [P] 每个高斯体上穿过射线数量 (要往里填东西)
+			last_contr_gauss_ptr,					// [1 H W] 每个 pixel 最后一个对该 pixel 产生贡献的高斯体的 idx (要往里填东西)
+			out_depths_ptr,							// [P] 每个高斯体投影深度 view.z (要往里填东西)
+			reps.contiguous().data<float>(),				// 自定义高斯体特征 [P DIM]
+			out_reps_ptr							// [NUM_DIM H W] 每个 pixel 的自定义特征 (要往里填东西)
 		);
 	}
 
@@ -190,16 +195,17 @@ RasterizeGaussiansCUDA(
 		geomBuffer,
 		binningBuffer,
 		imgBuffer,
-		out_invdepth,	// [1 H W], 反深度图
+		out_invdepth,		// [1 H W], 反深度图
 		accum_alpha,		// [1 H W], 每个 pixel 的剩余透射率
-		gauss_sum,
-		gauss_count,
-		last_contr_gauss,
-		out_depths
+		gauss_sum,			// [P] 每个高斯体上累计的剩余透射率
+		gauss_count,		// [P] 每个高斯体上穿过射线数量
+		last_contr_gauss,	// [1 H W] 每个 pixel 最后一个对该 pixel 产生贡献的高斯体的 idx
+		out_depths,			// [P] 每个高斯体投影深度 view.z
+		out_reps			// [NUM_DIM H W] 每个 pixel 的自定义特征
 	);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
  RasterizeGaussiansBackwardCUDA(
  	const torch::Tensor& background,			// 背景颜色
 	const torch::Tensor& means3D,				// 所有高斯体的 3D 坐标 [P 3]
@@ -216,6 +222,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const float tan_fovy,						// 单位深度处的半高度
     const torch::Tensor& dL_dout_color,					// loss 对渲染 RGB 图像的梯度 [3 H W] (backward 的输入参数)
 	const torch::Tensor& dL_dout_invdepth,				// loss 对反深度图的梯度 [1 H W]	  (backward 的输入参数)
+	const torch::Tensor& dL_dout_reps,					// loss 对自定义高斯体特征的梯度 [NUM_DIM H W] (backward 的输入参数)
 	const torch::Tensor& sh,					// sh 系数 [P M(16) D(3)], M 通常是 (degree+1)^2
 	const int degree,							// sh 的阶数
 	const torch::Tensor& campos,				// 相机在世界里的坐标
@@ -224,7 +231,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
 	const bool antialiasing,					// 是否开启抗锯齿
-	const bool debug							// 是否开启调试模式
+	const bool debug,							// 是否开启调试模式
+	const torch::Tensor& reps					// 自定义高斯体特征 [P NUM_DIM]
 ) {
 	const int P = means3D.size(0);			// 高斯点的数量
 	const int H = dL_dout_color.size(1);	// 图像的高度
@@ -245,7 +253,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	torch::Tensor dL_dscales = torch::zeros({P, 3}, means3D.options());				// loss 对每个高斯体的尺度 (在 xyz 轴的缩放长度) 的梯度 [P 3]
 	torch::Tensor dL_drotations = torch::zeros({P, 4}, means3D.options());			// loss 对每个高斯体的旋转变量的梯度 [P 4]
 	torch::Tensor dL_dinvdepths = torch::zeros({0, 1}, means3D.options());			// loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
-	
+	torch::Tensor dL_dreps = torch::zeros({P, NUM_DIM}, means3D.options());			// loss 对自定义高斯体特征的梯度 [P NUM_DIM]
+
 	// 答疑:
 	// 为什么相比于 return 的那几个梯度, 多了一个 dL_dconic 和 dL_dinvdepths? 我们在 .apply(...) 的参数也妹有这俩输入啊
 	// 这是因为, conic 和 invdepths 是中间量, 还记得 conic 和 invdepths 是怎么计算出来的吗?
@@ -299,6 +308,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 			// 从 Python 端传回的 loss 对 forward 输出的梯度
 			dL_dout_color.contiguous().data<float>(),		// loss 对渲染 RGB 图像的梯度 [3 H W]
 			dL_dout_invdepthptr,							// loss 对反深度图的梯度 [1 H W]
+			dL_dout_reps.contiguous().data<float>(),		// loss 对自定义高斯体特征的梯度 [NUM_DIM H W]
 
 			// 需要往里写入值的梯度
 			dL_dmeans2D.contiguous().data<float>(),				// loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
@@ -314,7 +324,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 
 			// 额外开关
 			antialiasing,			// 是否开启抗锯齿
-			debug					// 是否开启调试模式
+			debug,					// 是否开启调试模式
+
+			reps.contiguous().data<float>(),					// 自定义高斯体特征 [P NUM_DIM]
+			dL_dreps.contiguous().data<float>()					// loss 对自定义高斯体特征的梯度 [P NUM_DIM]
 		);
 	}
 
@@ -326,7 +339,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 		dL_dcov3D,				// loss 对预先计算好的协方差的矩阵 (若有) 的梯度
 		dL_dsh,					// loss 对 sh 系数的梯度
 		dL_dscales,				// loss 对每个高斯体的尺度 (在 xyz 轴的缩放长度) 的梯度
-		dL_drotations			// loss 对每个高斯体的旋转变量的梯度
+		dL_drotations,			// loss 对每个高斯体的旋转变量的梯度
+		dL_dreps				// loss 对自定义高斯体特征的梯度 [P NUM_DIM]
 	);
 }
 
