@@ -471,7 +471,7 @@ __global__ void preprocessCUDA(
 }
 
 // Backward version of the rendering procedure.
-template <uint32_t C>
+template <uint32_t C, uint32_t DIM>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,				// [tileID 2] tile 负责的 pairs 范围, 值是 point_list_keys 中的索引 (左闭右开)
@@ -487,11 +487,14 @@ renderCUDA(
 	const uint32_t* __restrict__ n_contrib,			// [P] 该像素光线上穿过的高斯体数量
 	const float* __restrict__ dL_dpixels,			// loss 对渲染 RGB 图像的梯度 [3 H W]
 	const float* __restrict__ dL_invdepths,			// loss 对反深度图的梯度 [1 H W]
+	const float* __restrict__ dL_reps,				// loss 对自定义特征的梯度 [NUM_DIM H W]
 	float3* __restrict__ dL_dmean2D,						// 输出: loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
 	float4* __restrict__ dL_dconic2D,						// 输出: loss 对高斯点 2D 协方差矩阵的梯度 [P 2 2]
 	float* __restrict__ dL_dopacity,						// 输出: loss 对高斯体不透明度的梯度 [P 1]
 	float* __restrict__ dL_dcolors,							// 输出: loss 对高斯点 RGB 颜色的梯度 [P 3]
-	float* __restrict__ dL_dinvdepths						// 输出: loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+	float* __restrict__ dL_dinvdepths,						// 输出: loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+	float* __restrict__ dL_dreps,							// 输出: loss 对自定义特征的梯度 [P NUM_DIM]
+	const float* __restrict__ regs					// [P M] 高斯点的自定义特征
 ) {
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
@@ -522,6 +525,7 @@ renderCUDA(
 	__shared__ float2 collected_xy[BLOCK_SIZE];				// 高斯体投影圆心的 2D 坐标
 	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];	// 高斯体投影椭圆的 2D 协方差矩阵的逆矩阵 + 3D 高斯体的不透明度
 	__shared__ float collected_colors[C * BLOCK_SIZE];		// 高斯体投影圆心的 RGB 颜色
+	__shared__ float collected_regs[DIM * BLOCK_SIZE];		// 高斯点的自定义特征
 	__shared__ float collected_depths[BLOCK_SIZE];			// 高斯体投影深度
 
 	// In the forward, we stored the final value for T, the
@@ -535,19 +539,24 @@ renderCUDA(
 	const int last_contributor = inside ? n_contrib[pix_id] : 0;	// 对当前 pixel 产生贡献的最后一个高斯体编号 (编号从 1 开始)
 
 	float dL_dpixel[C];			// 用来存 loss 对当前 pixel RGB 颜色的梯度 [3]
+	float dL_rep[DIM];			// 用来存 loss 对当前 pixel 自定义特征的梯度 [NUM_DIM]
 	float dL_invdepth;			// 用来存 loss 对当前 pixel 反深度的梯度 [1]
 	if (inside) {
 		for (int i = 0; i < C; i++)
 			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
+		for (int i = 0; i < DIM; i++)
+			dL_rep[i] = dL_reps[i * H * W + pix_id];
 		if(dL_invdepths)
 			dL_invdepth = dL_invdepths[pix_id];
 	}
 	float accum_rec[C] = { 0 };		// 一个过程量, 后续算梯度会用到
+	float accum_rep[DIM] = { 0 };	// 一个过程量, 后续算梯度会用到
 	float accum_invdepth_rec = 0;	// 一个过程量, 后续算梯度会用到
 
 	// 下面这三个量, 是在反向遍历的时候, 用来保存上一个被处理到的高斯体的一些属性
 	float last_alpha = 0;			// 上一个高斯体的 alpha
 	float last_color[C] = { 0 };	// 上一个高斯体的颜色
+	float last_rep[DIM] = { 0 };	// 上一个高斯体的自定义特征
 	float last_invdepth = 0;		// 上一个高斯体的反深度
 
 
@@ -572,6 +581,8 @@ renderCUDA(
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
 			for (int i = 0; i < C; i++)
 				collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
+			for (int i = 0; i < DIM; i++)
+				collected_regs[i * BLOCK_SIZE + block.thread_rank()] = regs[coll_id * DIM + i];
 			if(dL_invdepths)
 				collected_depths[block.thread_rank()] = depths[coll_id];
 		}
@@ -619,6 +630,19 @@ renderCUDA(
 
 				// 算 dL/dc_{now}
 				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
+			}
+
+			for (int ch = 0; ch < DIM; ch++) {
+				const float dL_dchannel = dL_rep[ch];
+
+				// 算 dL/dα_{now}
+				const float c = collected_regs[ch * BLOCK_SIZE + j];	// 当前高斯体的自定义特征 c
+				accum_rep[ch] = last_alpha * last_rep[ch] + (1.f - last_alpha) * accum_rep[ch];
+				last_rep[ch] = c;
+				dL_dalpha += (c - accum_rep[ch]) * dL_dchannel;
+
+				// 算 dL/dc_{now}
+				atomicAdd(&(dL_dreps[global_id * DIM + ch]), dchannel_dcolor * dL_dchannel);
 			}
 
 			// 算 dL/dinvdepth_{now} 和 dL/dα_{now}
@@ -764,14 +788,17 @@ void BACKWARD::render(
 	const uint32_t* n_contrib,		// [P] 该像素光线上穿过的高斯体数量
 	const float* dL_dpixels,		// loss 对渲染 RGB 图像的梯度 [3 H W]
 	const float* dL_invdepths,		// loss 对反深度图的梯度 [1 H W]
+	const float* dL_reps,			// loss 对自定义特征的梯度 [NUM_DIM H W]
 	float3* dL_dmean2D,						// 输出: loss 对 ndc 空间的高斯点 2D 坐标的梯度 [P 2]
 	float4* dL_dconic2D,					// 输出: loss 对高斯点 2D 协方差逆矩阵的梯度 [P 2 2]
 	float* dL_dopacity,						// 输出: loss 对高斯点不透明度的梯度 [P 1]
 	float* dL_dcolors,						// 输出: loss 对高斯点 RGB 颜色的梯度 [P 3]
-	float* dL_dinvdepths					// 输出: loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+	float* dL_dinvdepths,					// 输出: loss 对每个高斯体投影深度 view.z 的梯度 [P 1]
+	float* dL_dreps,						// 输出: loss 对自定义特征的梯度 [P NUM_DIM]
+	const float* reps				// [NUM_DIM H W] 自定义特征
 ) {
 	// 每个像素并行去做
-	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
+	renderCUDA<NUM_CHANNELS, NUM_DIM> << <grid, block >> >(
 		ranges,
 		point_list,
 		W,
@@ -785,10 +812,13 @@ void BACKWARD::render(
 		n_contrib,
 		dL_dpixels,
 		dL_invdepths,
+		dL_reps,
 		dL_dmean2D,
 		dL_dconic2D,
 		dL_dopacity,
 		dL_dcolors,
-		dL_dinvdepths
+		dL_dinvdepths,
+		dL_dreps,
+		reps
 	);
 }

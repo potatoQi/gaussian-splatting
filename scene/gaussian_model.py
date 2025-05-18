@@ -53,12 +53,14 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree, optimizer_type="default"):
+    def __init__(self, sh_degree, dim=16, optimizer_type="default"):
         self.active_sh_degree = 0                   # 当前球谐函数的阶数
         self.optimizer_type = optimizer_type        # 优化器类型 (default or sparse_adam)
         self.max_sh_degree = sh_degree              # 最大球谐阶数, 就等于用户传进来的值
+        self.dim = dim                              # 高斯体自定义特征维度
 
         self._xyz = torch.empty(0)                  # 存储所有高斯点的坐标
+        self._reps = torch.empty(0)                 # 存储所有高斯点的自定义特征
         self._scaling = torch.empty(0)              # 存储每个点尺度的 logits 值 (在 xyz 轴的缩放长度)
         self._opacity = torch.empty(0)              # 存储每个点不透明度的 logits 值
         self._rotation = torch.empty(0)             # 存储每个点的 logits 旋转变量 (每个旋转变量是 4 维) (协方差矩阵, 控制旋转方向)
@@ -98,6 +100,7 @@ class GaussianModel:
         # 然后里面每一个是一个 dict, params 就是优化器要优化的参数, lr 就是优化这个参数的学习率, name 就是给这个参数起一个名字
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
+            {'params': [self._reps], 'lr': training_args.reps_lr, "name": "reps"},
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
@@ -142,7 +145,8 @@ class GaussianModel:
     def restore(self, model_args, training_args):
         (
             self.active_sh_degree, 
-            self._xyz, 
+            self._xyz,
+            self._reps,
             self._features_dc, 
             self._features_rest,
             self._scaling, 
@@ -164,6 +168,7 @@ class GaussianModel:
         return (
             self.active_sh_degree,
             self._xyz,
+            self._reps,
             self._features_dc,
             self._features_rest,
             self._scaling,
@@ -266,6 +271,7 @@ class GaussianModel:
         
         # 取出满足条件的点的坐标, 缩放长度, 旋转, 不透明度, 颜色, 投影半径
         new_xyz = self._xyz[selected_pts_mask]
+        new_reps = self._reps[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
@@ -274,11 +280,12 @@ class GaussianModel:
         new_tmp_radii = self.tmp_radii[selected_pts_mask]
 
         # 将这些点 clone 一份
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_reps, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
     def densification_postfix(
         self,
         new_xyz,                    # 要 clone 的点的坐标
+        new_reps,                   # 要 clone 的点的 自定义特征
         new_features_dc,            # 要 clone 的点的 dc 分量
         new_features_rest,          # 要 clone 的点的 高频分量
         new_opacities,              # 要 clone 的点的不透明度
@@ -288,6 +295,7 @@ class GaussianModel:
     ):
         d = {
             "xyz": new_xyz,
+            "reps": new_reps,
             "f_dc": new_features_dc,
             "f_rest": new_features_rest,
             "opacity": new_opacities,
@@ -301,6 +309,7 @@ class GaussianModel:
 
         # 更新这些参数
         self._xyz = optimizable_tensors["xyz"]
+        self._reps = optimizable_tensors["reps"]
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
@@ -363,6 +372,7 @@ class GaussianModel:
         # 把这 M*N 个点的坐标, 协方差, 不透明度, 颜色, 投影半径都选出来
         # 这个 M*N 个点的坐标叠加了偏差, 尺度是在父尺度上缩小了
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1) # torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) 得到世界坐标系下的偏移向量
+        new_reps = self._reps[selected_pts_mask].repeat(N, 1)
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
@@ -371,7 +381,7 @@ class GaussianModel:
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
 
         # 将这些点 clone 一份
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_reps, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
 
         # 把那些已经老的, 之前用来复制新点的老点给剪掉
         # prune_filter 就是最新版 (因为刚刚才 clone 过 M*N 个点) 的 mask
@@ -388,6 +398,7 @@ class GaussianModel:
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
         self._xyz = optimizable_tensors["xyz"]
+        self._reps = optimizable_tensors["reps"]
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
@@ -469,6 +480,10 @@ class GaussianModel:
         return self._xyz
     
     @property
+    def get_reps(self):
+        return self._reps
+    
+    @property
     def get_features(self):
         features_dc = self._features_dc
         features_rest = self._features_rest
@@ -521,8 +536,10 @@ class GaussianModel:
         rots[:, 0] = 1
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        reps = torch.randn((fused_point_cloud.shape[0], self.dim), device="cuda")
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self._reps = nn.Parameter(reps.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
