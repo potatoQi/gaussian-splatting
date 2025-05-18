@@ -18,3 +18,4 @@ dependencies:
     - -e submodules/fused-ssim
     - opencv-python
     - joblib
+    - matplotlib

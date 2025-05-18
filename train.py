@@ -10,6 +10,7 @@
 #
 
 import os
+from datetime import datetime
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
@@ -196,6 +197,12 @@ def training(
         # 每个高斯点投影到图像上时的像素半径
         radii = render_pkg["radii"]  # tensor, [N]
 
+        if iteration % 100 == 0:
+            print('===========================================================')
+            for idx in range(min(10, len(render_pkg['gauss_sum']))):
+                if render_pkg['gauss_count'][idx] > 0:
+                    print(f"Gaussian {idx} , Transmittance: {render_pkg['gauss_sum'][idx] / render_pkg['gauss_count'][idx]}")
+
         # 如果有透明度掩码, 就把渲染出来的图像乘以透明度掩码
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
@@ -348,7 +355,10 @@ def prepare_output_and_logger(args):
     # 实例化一个 tensorboard 对象
     tb_writer = None
     if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.model_path)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder_name = os.path.join(args.model_path, 'tensorboard', timestamp)
+        os.makedirs(folder_name, exist_ok=True)
+        tb_writer = SummaryWriter(folder_name)
     else:
         print("Tensorboard not available: not logging progress")
     return tb_writer
@@ -372,6 +382,7 @@ def training_report(
         tb_writer.add_scalar('iter_time', elapsed, iteration)
 
     # 如果到了 test 的时间点, 就测一把
+    # validation_configs 会评估俩视角, 一个是训练集的, 一个是测试集的; 测试集只有开了 --eval 才会有
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
         validation_configs = (
@@ -437,7 +448,7 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[5000, 30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)

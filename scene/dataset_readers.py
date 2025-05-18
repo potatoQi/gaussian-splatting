@@ -218,6 +218,7 @@ def readColmapSceneInfo(
 
     # 划分训练集和测试集
     train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test] # 如果是 Synthetic‐NeRF 训练评估模式, 没有啥训练集测试集之分, 都是训练集. 只不过 test 的时候用图的右半边
+    # 上面这句话就是说如果 train_test_exp 为真, 那就会把所有的 CameraInfo 对象都放到训练集里; 否则只把那些 c.is_test=False 的对象放到训练集里
     test_cam_infos = [c for c in cam_infos if c.is_test]
 
     # 是基于训练集的相机位姿，计算场景在 NeRFpp 中的归一化参数，包括平移向量和归一化半径
