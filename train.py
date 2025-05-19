@@ -95,6 +95,11 @@ def training(
         opt.depth_l1_weight_final,  # 默认是 0.01
         max_steps=opt.iterations
     )
+    rep_l1_weight = get_expon_lr_func(
+        opt.rep_l1_weight_init,    # 默认是 1.0
+        opt.rep_l1_weight_final,   # 默认是 0.001
+        max_steps=opt.iterations
+    )
 
     # 优化高斯模型的过程中, 需要反复从不同角度把模型渲染出来, 跟 gt 照片做对比
     # 所以 sceme.getTrainCameras() 这个方法会返回一个训练用到的视角列表
@@ -245,10 +250,13 @@ def training(
             Ll1depth = 0
 
         # 自定义特征图损失
-        gt_rep = torch.full_like(rep, 10.0, device="cuda")  # tensor, [DIM, H, W]
-        Ll1rep = l1_loss(rep, gt_rep)
-        # 如果不想要自定义特征图损失影响总 loss, 就把权重置为 0
-        loss = loss + opt.lambda_rep * Ll1rep
+        Ll1rep = 0.0
+        if opt.rep:
+            gt_rep = torch.full_like(rep, 10.0, device="cuda")  # tensor, [DIM, H, W]
+            Ll1rep = l1_loss(rep, gt_rep)
+            # 如果不想要自定义特征图损失影响总 loss, 就把权重置为 0
+            loss = loss + rep_l1_weight(iteration) * Ll1rep
+            Ll1rep = Ll1rep.item()
 
         loss.backward()
 
@@ -261,7 +269,7 @@ def training(
             # 更新下 ema 的 loss 们
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
-            ema_Ll1rep_for_log = 0.4 * Ll1rep.item() + 0.6 * ema_Ll1rep_for_log
+            ema_Ll1rep_for_log = 0.4 * Ll1rep + 0.6 * ema_Ll1rep_for_log
 
             if iteration % 10 == 0:
                 progress_bar.set_postfix(
